@@ -217,6 +217,14 @@ def build_file_attachment_text(file_name: str, text_content: str) -> str:
     return f"[فایل ضمیمه: {file_name}]\n```\n{truncated}{note}\n```"
 
 
+def is_command(text: str | None) -> bool:
+    """بررسی می‌کنه که آیا پیام یه دستور هست (با / شروع می‌شه) یا نه.
+    اگه دستور باشه، ربات مستقیم جواب می‌ده و ایجنت صدا زده نمی‌شه."""
+    if not text:
+        return False
+    return text.strip().startswith("/")
+
+
 def handle_command(
     tg: TelegramAPI,
     db: Storage,
@@ -228,9 +236,26 @@ def handle_command(
     stats_topic_id: int,
     text: str,
 ) -> bool:
-    """اگه پیام یک دستور بود، پردازشش می‌کنه و True برمی‌گردونه؛ وگرنه False."""
+    """اگه پیام یک دستور بود، پردازشش می‌کنه و True برمی‌گردونه؛ وگرنه False.
+    همه‌ی پیام‌هایی که با / شروع بشن، اینجا هندل می‌شن — اگه دستور شناخته‌شده نبود،
+    یه پیام راهنما می‌فرستیم و ایجنت صدا زده نمی‌شه."""
     stripped = text.strip()
     lowered = stripped.lower()
+
+    if lowered == "/start":
+        tg.send_message(
+            chat_id,
+            "👋 سلام! من یه دستیار هوشمند فارسی‌زبانم که روی سرور اجرا می‌شم.\n\n"
+            "✨ می‌تونم:\n"
+            "• به سوالاتت جواب بدم\n"
+            "• تو وب جستجو کنم (قیمت، اخبار، ...)\n"
+            "• کد پایتون و شل اجرا کنم\n"
+            "• فایل و عکس بفرستم\n\n"
+            "📝 پیامت رو بفرست تا شروع کنیم!\n\n"
+            "دستورات: /help /stats /models /model /reset /export /clear_tokens",
+            message_thread_id=answer_topic_id,
+        )
+        return True
 
     if lowered == "/stats":
         model_key, model_id = resolve_model(db, user_id)
@@ -346,6 +371,25 @@ def handle_command(
             "برای سوال زمان‌مندی (قیمت، اخبار، آب‌وهوا) فقط بپرس، خودم جستجو می‌کنم!"
         )
         tg.send_message(chat_id, help_text, message_thread_id=answer_topic_id)
+        return True
+
+    # اگه پیام با / شروع شده ولی دستور شناخته‌شده نبود، یه پیام راهنما بفرست
+    # و ایجنت صدا زده نمی‌شه (return True)
+    if is_command(text):
+        tg.send_message(
+            chat_id,
+            f"❓ دستور `{stripped}` شناخته نشد.\n\n"
+            "دستورات موجود:\n"
+            "• `/start` - شروع ربات\n"
+            "• `/help` - راهنمای کامل\n"
+            "• `/stats` - آمار ربات\n"
+            "• `/models` - لیست مدل‌ها\n"
+            "• `/model <name>` - تعویض مدل\n"
+            "• `/reset` - پاک کردن تاریخچه\n"
+            "• `/export` - خروجی تاریخچه\n"
+            "• `/clear_tokens` - پاک کردن cooldown توکن‌ها",
+            message_thread_id=answer_topic_id,
+        )
         return True
 
     return False
@@ -478,21 +522,16 @@ def handle_message(tg: TelegramAPI, db: Storage, token_manager: CloudflareTokenM
 
     # هر کاربر فقط یه پیام رو در آنِ واحد پردازش می‌کنه
     with _get_user_lock(user_id):
-        if text and text.strip() == "/start":
-            tg.send_message(
-                chat_id,
-                "سلام! پیامت رو بفرست تا شروع کنیم. من سه تاپیک برات می‌سازم: یکی برای "
-                "فکرهام، یکی برای پاسخ نهایی و یکی برای وضعیت توکن‌ها. "
-                "دستورات: /stats /models /model /reset /export /clear_tokens /help",
-            )
-            ensure_topics(tg, db, chat_id, user_id)
-            return
-
+        # اول تاپیک‌ها رو بساز (اگه ساخته نشده باشن)
         thoughts_topic_id, answer_topic_id, stats_topic_id = ensure_topics(tg, db, chat_id, user_id)
 
-        if text and handle_command(
-            tg, db, token_manager, chat_id, user_id, thoughts_topic_id, answer_topic_id, stats_topic_id, text
-        ):
+        # اگه پیام یه دستوره (با / شروع می‌شه)، ربات مستقیم جواب می‌ده
+        # و ایجنت صدا زده نمی‌شه. این شامل /start هم می‌شه.
+        if text and is_command(text):
+            handle_command(
+                tg, db, token_manager, chat_id, user_id,
+                thoughts_topic_id, answer_topic_id, stats_topic_id, text
+            )
             return
 
         # --- تصویر ---
