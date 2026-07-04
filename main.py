@@ -9,16 +9,15 @@ from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from config import Config
-from key_manager import NvidiaKeyManager
-from nvidia_client import NvidiaAgentClient
 from cf_client import CloudflareAIClient
+from cf_key_manager import CloudflareTokenManager
 from telegram_api import TelegramAPI, split_long_text
 from storage import Storage
 from agent import run_agent
 
 THOUGHTS_TOPIC_NAME = "🧠 فکرها"
 ANSWER_TOPIC_NAME = "💬 پاسخ نهایی"
-STATS_TOPIC_NAME = "🔑 آمار و کلیدها"
+STATS_TOPIC_NAME = "🔑 آمار و توکن‌ها"
 
 STATE_KEY_OFFSET = "last_update_offset"
 
@@ -30,8 +29,7 @@ TEXT_FILE_EXTENSIONS = {
 
 START_TIME = time.time()
 
-# قفل جدا برای هر کاربر تا پیام‌های همزمانِ یک کاربر روی هم ننویسن؛
-# پیام‌های کاربرهای مختلف موازی پردازش می‌شن.
+# قفل جدا برای هر کاربر تا پیام‌های همزمانِ یک کاربر روی هم ننویسن
 _user_locks: dict[int, threading.Lock] = {}
 _user_locks_guard = threading.Lock()
 
@@ -46,23 +44,27 @@ def _get_user_lock(user_id: int) -> threading.Lock:
 
 
 def ensure_topics(tg: TelegramAPI, db: Storage, chat_id: int, user_id: int) -> tuple[int, int, int]:
+    """سه تاپیک برای هر کاربر می‌سازه (یا برمی‌گردونه): فکرها، پاسخ نهایی، آمار."""
     existing = db.get_topics(user_id)
-    if existing and existing[2]:
+
+    # حالت ۱: همه‌ی تاپیک‌ها موجوده
+    if existing and existing[0] and existing[1] and existing[2]:
         return existing[0], existing[1], existing[2]
 
-    if existing:
-        # کاربر قدیمی که فقط دو تاپیک داره؛ فقط تاپیک آمار رو براش می‌سازیم.
-        thoughts_id, answer_id, _ = existing
+    # حالت ۲: کاربر قدیمی — فقط تاپیک‌های کم‌شده رو بساز
+    if existing and existing[0] and existing[1] and not existing[2]:
         stats_topic = tg.create_forum_topic(chat_id, STATS_TOPIC_NAME)
         stats_id = stats_topic["message_thread_id"]
-        db.save_topics(user_id, thoughts_id, answer_id, stats_id)
+        db.set_stats_topic(user_id, stats_id)
         tg.send_message(
             chat_id,
-            "این تاپیک وضعیت کلیدهای NVIDIA و مصرف توکن‌شون رو نشون می‌ده 🔑",
+            "این تاپیک وضعیت توکن‌های Cloudflare و مصرف‌شون رو نشون می‌ده 🔑\n"
+            "برای دیدن آمار کامل، /stats رو بفرست.",
             message_thread_id=stats_id,
         )
-        return thoughts_id, answer_id, stats_id
+        return existing[0], existing[1], stats_id
 
+    # حالت ۳: کاربر جدید — همه‌ی تاپیک‌ها رو بساز
     thoughts_topic = tg.create_forum_topic(chat_id, THOUGHTS_TOPIC_NAME)
     answer_topic = tg.create_forum_topic(chat_id, ANSWER_TOPIC_NAME)
     stats_topic = tg.create_forum_topic(chat_id, STATS_TOPIC_NAME)
@@ -73,40 +75,31 @@ def ensure_topics(tg: TelegramAPI, db: Storage, chat_id: int, user_id: int) -> t
 
     db.save_topics(user_id, thoughts_id, answer_id, stats_id)
 
+    tg.send_message(chat_id, "این تاپیک برای فکرها و مراحل داخلی ایجنته 🧠", message_thread_id=thoughts_id)
+    tg.send_message(chat_id, "پاسخ‌های نهایی من اینجا میاد 💬", message_thread_id=answer_id)
     tg.send_message(
         chat_id,
-        "این تاپیک برای فکرها و مراحل داخلی ایجنته 🧠",
-        message_thread_id=thoughts_id,
-    )
-    tg.send_message(
-        chat_id,
-        "پاسخ‌های نهایی من اینجا میاد 💬",
-        message_thread_id=answer_id,
-    )
-    tg.send_message(
-        chat_id,
-        "این تاپیک وضعیت کلیدهای NVIDIA و مصرف توکن‌شون رو نشون می‌ده 🔑",
+        "این تاپیک وضعیت توکن‌های Cloudflare و مصرف‌شون رو نشون می‌ده 🔑\n"
+        "برای دیدن آمار کامل، /stats رو بفرست.",
         message_thread_id=stats_id,
     )
     return thoughts_id, answer_id, stats_id
 
 
-def format_keys_stats_text(key_manager: NvidiaKeyManager, header: str = "🔑 *وضعیت کلیدهای NVIDIA*") -> str:
+def format_tokens_stats_text(token_manager: CloudflareTokenManager, header: str = "🔑 *وضعیت توکن‌های Cloudflare*") -> str:
     lines = [header]
-    active_masked = key_manager.active_key_masked()
-    lines.append(f"کلیدِ در حالِ استفاده الان: `{active_masked or 'هنوز درخواستی زده نشده'}`")
+    active_masked = token_manager.active_token_masked()
+    lines.append(f"توکنِ در حالِ استفاده الان: `{active_masked or 'هنوز درخواستی زده نشده'}`")
     lines.append("")
-    for item in key_manager.usage_snapshot():
+    for item in token_manager.usage_snapshot():
         marker = "🟢" if item["is_active"] else ("⚪" if item["available"] else "🔴")
         line = (
-            f"{marker} کلید {item['index']} (`{item['masked']}`) — "
+            f"{marker} توکن {item['index']} (`{item['masked']}`) — "
             f"{item['requests']} درخواست — "
             f"{item['total_tokens']} توکن (ورودی {item['prompt_tokens']} / خروجی {item['completion_tokens']})"
         )
-        if item["remaining_tokens"] is not None:
-            line += f" — باقی‌مونده: {item['remaining_tokens']}"
         if not item["available"]:
-            line += f" — 🚫 در کول‌داون ({item['cooldown_seconds']:.0f} ثانیه دیگه)"
+            line += f" — 🚫 محدود ({item['cooldown_seconds']:.0f} ثانیه دیگه)"
         lines.append(line)
     return "\n".join(lines)
 
@@ -146,15 +139,8 @@ class TypingLoop:
 
 class StreamEditor:
     """
-    پاسخ نهایی رو به‌جای یک پیام کامل، به‌صورت زنده (استریم، توکن‌به‌توکن) توی تلگرام
-    ادیت می‌کنه. اولین تکه‌ی متن، یه پیام جدید می‌فرسته و تکه‌های بعدی همون پیام رو
-    edit می‌کنن. برای رعایت محدودیت نرخِ editMessageText تلگرام، بین ادیت‌ها حداقل
-    فاصله رعایت می‌شه.
-
-    نکته‌ی مهم: بافر بین مرحله‌های ایجنت (قبل/بعد از هر tool call) دیگه پاک نمی‌شه.
-    قبلاً هر مرحله‌ی جدید بافر رو خالی می‌کرد و همین باعث می‌شد کاربر ببینه یه متن
-    نوشته می‌شه، بعد پاک می‌شه و یه متن کاملاً متفاوت جاش میاد. حالا متن به‌صورت
-    پیوسته رشد می‌کنه و فقط در پایان (finalize) یک‌بار با پاسخ نهاییِ تمیز جایگزین می‌شه.
+    پاسخ نهایی رو به‌جای یک پیام کامل، به‌صورت زنده (استریم) توی تلگرام ادیت می‌کنه.
+    اولین تکه‌ی متن، یه پیام جدید می‌فرسته و تکه‌های بعدی همون پیام رو edit می‌کنن.
     """
 
     def __init__(self, tg: TelegramAPI, chat_id: int, message_thread_id: int, min_interval: float):
@@ -202,39 +188,25 @@ class StreamEditor:
                 else:
                     self._tg.edit_message_text(self._chat_id, self._message_id, display)
             except Exception as e:
-                # اگه edit خطا بده (مثلاً پیام خیلی طولانی یا مارک‌داون نامعتبر)،
-                # یه پیام جدید بفرست تا پیام نهایی از دست نره
+                # اگه edit خطا بده، یه پیام جدید بفرست
                 if self._message_id is not None and force:
                     try:
-                        self._tg.send_message(
-                            self._chat_id, display, message_thread_id=self._thread_id
-                        )
+                        self._tg.send_message(self._chat_id, display, message_thread_id=self._thread_id)
                     except Exception:
                         pass
-            break  # فعلا فقط اولین تکه رو زنده ادیت می‌کنیم؛ اگه خیلی بلند شد در finalize کامل می‌فرستیم
+            break  # فعلا فقط اولین تکه رو زنده ادیت می‌کنیم
 
         if force and len(text) > 3800:
-            # اگه پاسخ نهایی طولانی‌تر از یه پیام تلگرامه، بقیه‌ش رو جداگانه می‌فرستیم.
             rest = text[3800:]
             send_long(self._tg, self._chat_id, rest, self._thread_id)
 
 
-def resolve_model(db: Storage, user_id: int) -> tuple[str, str, str]:
-    """(model_key, provider, model_id) رو برمی‌گردونه؛ اول ترجیح خود کاربر، بعد مدل پیش‌فرض.
-    provider: "cf" یا "nvidia"
-    """
+def resolve_model(db: Storage, user_id: int) -> tuple[str, str]:
+    """(model_key, model_id) رو برمی‌گردونه."""
     model_key = db.get_user_model(user_id) or Config.DEFAULT_MODEL_KEY
     if model_key not in Config.MODELS:
         model_key = Config.DEFAULT_MODEL_KEY
-    # MODELS[key] = (provider, model_id)
-    entry = Config.MODELS.get(model_key)
-    if entry is None:
-        # fallback
-        return model_key, "cf", Config.CF_AI_MODEL
-    if isinstance(entry, tuple):
-        return model_key, entry[0], entry[1]
-    # backward compat: اگه entry یه string باشه (نسخه‌های قدیمی)
-    return model_key, "nvidia", entry
+    return model_key, Config.MODELS.get(model_key, Config.MODELS[Config.DEFAULT_MODEL_KEY])
 
 
 def build_file_attachment_text(file_name: str, text_content: str) -> str:
@@ -248,7 +220,7 @@ def build_file_attachment_text(file_name: str, text_content: str) -> str:
 def handle_command(
     tg: TelegramAPI,
     db: Storage,
-    key_manager: NvidiaKeyManager,
+    token_manager: CloudflareTokenManager,
     chat_id: int,
     user_id: int,
     thoughts_topic_id: int,
@@ -261,41 +233,30 @@ def handle_command(
     lowered = stripped.lower()
 
     if lowered == "/stats":
-        model_key, provider, model_id = resolve_model(db, user_id)
-        # اگه key_manager تنظیم شده (NVIDIA fallback فعال هست)، آمار کلیدها رو نشون بده
-        if key_manager:
-            keys_line = f"- کلیدهای NVIDIA فعال: {key_manager.available_keys()}/{key_manager.total_keys()}\n"
-            keys_detail = f"\n{format_keys_stats_text(key_manager, header='🔑 *ریز مصرف کلیدها:*')}"
-        else:
-            keys_line = "- پروایدر: Cloudflare Workers AI (بدون کلید NVIDIA)\n"
-            keys_detail = ""
+        model_key, model_id = resolve_model(db, user_id)
         msg = (
             "📊 *آمار ربات*\n"
             f"- پیام‌های شما: {db.count_messages(user_id)}\n"
             f"- کل پیام‌های ثبت‌شده: {db.count_messages()}\n"
             f"- تعداد کاربران فعال: {db.count_users()}\n"
-            f"- مدل فعلی شما: `{model_key}` ({provider}) → `{model_id}`\n"
-            f"{keys_line}"
-            f"- زمان روشن بودن: {int((time.time() - START_TIME) // 60)} دقیقه{keys_detail}"
+            f"- مدل فعلی شما: `{model_key}` → `{model_id}`\n"
+            f"- توکن‌های Cloudflare فعال: {token_manager.available_tokens_count()}/{token_manager.total_tokens_count()}\n"
+            f"- کل درخواست‌ها: {token_manager.total_requests()}\n"
+            f"- کل توکن مصرفی: {token_manager.total_tokens_used():,}\n"
+            f"- زمان روشن بودن: {int((time.time() - START_TIME) // 60)} دقیقه\n\n"
+            f"{format_tokens_stats_text(token_manager, header='🔑 *ریز مصرف توکن‌ها:*')}"
         )
         tg.send_message(chat_id, msg, message_thread_id=answer_topic_id)
         return True
 
     if lowered == "/models":
-        model_key, _, _ = resolve_model(db, user_id)
+        model_key, _ = resolve_model(db, user_id)
         lines = ["📚 *مدل‌های قابل انتخاب:*"]
-        for key, entry in Config.MODELS.items():
-            if isinstance(entry, tuple):
-                provider, model_id = entry
-                prov_tag = "☁️ CF" if provider == "cf" else "🟢 NV"
-            else:
-                model_id = entry
-                prov_tag = "🟢 NV"
+        for key, model_id in Config.MODELS.items():
             marker = "✅" if key == model_key else "▫️"
-            lines.append(f"{marker} `{key}` {prov_tag} → {model_id}")
-        lines.append("\n*☁️ CF = Cloudflare (رایگان، پیشنهادی)*")
-        lines.append("*🟢 NV = NVIDIA (fallback)*")
-        lines.append("\nبرای تعویض: `/model <نام>` مثلا `/model glm-5.2`")
+            lines.append(f"{marker} `{key}` → {model_id}")
+        lines.append("\n*پیشنهادی:* `llama-3.3-70b` (سریع + باکیفیت)")
+        lines.append("\nبرای تعویض: `/model <نام>` مثلا `/model llama-3.3-70b`")
         tg.send_message(chat_id, "\n".join(lines), message_thread_id=answer_topic_id)
         return True
 
@@ -304,7 +265,7 @@ def handle_command(
         if len(parts) < 2 or not parts[1].strip():
             tg.send_message(
                 chat_id,
-                "برای دیدن لیست مدل‌ها از /models استفاده کن. مثال تعویض: `/model glm-5.2`",
+                "برای دیدن لیست مدل‌ها از /models استفاده کن. مثال تعویض: `/model llama-3.3-70b`",
                 message_thread_id=answer_topic_id,
             )
             return True
@@ -317,16 +278,9 @@ def handle_command(
             )
             return True
         db.set_user_model(user_id, key)
-        entry = Config.MODELS[key]
-        if isinstance(entry, tuple):
-            provider, model_id = entry
-            prov_name = "Cloudflare" if provider == "cf" else "NVIDIA"
-        else:
-            model_id = entry
-            prov_name = "NVIDIA"
         tg.send_message(
             chat_id,
-            f"✅ مدل شما به `{key}` ({prov_name}) تغییر کرد.\n`{model_id}`",
+            f"✅ مدل شما به `{key}` (`{Config.MODELS[key]}`) تغییر کرد.",
             message_thread_id=answer_topic_id,
         )
         return True
@@ -352,13 +306,14 @@ def handle_command(
         )
         return True
 
-    if lowered == "/clear_keys":
-        # reset کردن cooldown همه‌ی کلیدها (برای مواقعی که کلیدها موقتاً سوختن)
-        if key_manager:
-            cleared = key_manager.reset_cooldowns()
-            msg = f"🔓 cooldown همه‌ی کلیدها پاک شد.\n{cleared} کلید از حالت محدود خارج شد.\nالان {key_manager.available_keys()}/{key_manager.total_keys()} کلید فعال هست."
-        else:
-            msg = "ℹ️ کلید NVIDIA فعال نیست (فقط Cloudflare استفاده می‌شه). نیازی به /clear_keys نیست."
+    if lowered == "/clear_tokens":
+        # reset کردن cooldown همه‌ی توکن‌ها
+        cleared = token_manager.reset_cooldowns()
+        msg = (
+            f"🔓 cooldown همه‌ی توکن‌ها پاک شد.\n"
+            f"{cleared} توکن از حالت محدود خارج شد.\n"
+            f"الان {token_manager.available_tokens_count()}/{token_manager.total_tokens_count()} توکن فعال هست."
+        )
         tg.send_message(chat_id, msg, message_thread_id=stats_topic_id)
         return True
 
@@ -366,12 +321,12 @@ def handle_command(
         help_text = (
             "🤖 *راهنمای ربات*\n\n"
             "*دستورات:*\n"
-            "• `/stats` - نمایش آمار کامل ربات و کلیدها\n"
+            "• `/stats` - نمایش آمار کامل ربات و توکن‌ها\n"
             "• `/models` - لیست مدل‌های قابل انتخاب\n"
             "• `/model <name>` - تعویض مدل\n"
             "• `/reset` - پاک کردن تاریخچه\n"
             "• `/export` - خروجی JSON تاریخچه\n"
-            "• `/clear_keys` - پاک کردن cooldown کلیدها (وقتی کلیدها سوختن)\n"
+            "• `/clear_tokens` - پاک کردن cooldown توکن‌ها\n"
             "• `/help` - این راهنما\n\n"
             "*قابلیت‌ها:*\n"
             "• 📝 ارسال متن برای چت با ایجنت\n"
@@ -384,10 +339,10 @@ def handle_command(
             "*تاپیک‌ها:*\n"
             "• 🧠 فکرها - مراحل فکر ایجنت\n"
             "• 💬 پاسخ نهایی - جواب نهایی\n"
-            "• 🔑 آمار و کلیدها - وضعیت کلیدهای NVIDIA\n\n"
+            "• 🔑 آمار و توکن‌ها - وضعیت توکن‌های Cloudflare\n\n"
             "*مدل‌های پیشنهادی:*\n"
-            "• `llama-3.1-8b` - سریع و سبک (پیش‌فرض)\n"
-            "• `llama-3.2-90b-vision` - قدرتمند + vision\n\n"
+            "• `llama-3.3-70b` - سریع و باکیفیت (پیش‌فرض)\n"
+            "• `glm-5.2` - reasoning (دقیق‌تر ولی کندتر)\n\n"
             "برای سوال زمان‌مندی (قیمت، اخبار، آب‌وهوا) فقط بپرس، خودم جستجو می‌کنم!"
         )
         tg.send_message(chat_id, help_text, message_thread_id=answer_topic_id)
@@ -397,16 +352,15 @@ def handle_command(
 
 
 def _maybe_send_images_from_reply(tg: TelegramAPI, chat_id: int, message_thread_id: int, text: str) -> None:
-    """اگه مدل تو خروجیش Markdown image گذاشته (![](url))، ربات خودکار عکس رو بفرسته."""
+    """اگه مدل تو خروجیش Markdown image گذاشته، ربات خودکار عکس رو بفرسته."""
     if not Config.AUTO_SEND_IMAGES_IN_REPLY:
         return
-    # الگوی ![alt](url) برای عکس‌های با پسوند jpg/jpeg/png/webp/gif
     pattern = re.compile(
         r"!\[([^\]]*)\]\((https?://[^\s)]+\.(?:jpg|jpeg|png|gif|webp)(?:\?[^\s)]*)?)\)",
         re.IGNORECASE,
     )
     matches = pattern.findall(text)
-    for alt, url in matches[:5]:  # حداکثر ۵ عکس
+    for alt, url in matches[:5]:
         try:
             if url.lower().endswith(".gif") or ".gif?" in url.lower():
                 tg.send_animation_by_url(chat_id, url, caption=alt or None, message_thread_id=message_thread_id)
@@ -419,9 +373,8 @@ def _maybe_send_images_from_reply(tg: TelegramAPI, chat_id: int, message_thread_
 def run_agent_and_reply(
     tg: TelegramAPI,
     db: Storage,
-    key_manager,
-    cf_client,
-    nvidia_client,
+    token_manager: CloudflareTokenManager,
+    client: CloudflareAIClient,
     chat_id: int,
     user_id: int,
     thoughts_topic_id: int,
@@ -430,29 +383,16 @@ def run_agent_and_reply(
     user_content,
     history_text_for_db: str,
 ) -> None:
-    model_key, provider, model_id = resolve_model(db, user_id)
+    model_key, model_id = resolve_model(db, user_id)
     history = db.get_history(user_id, Config.MAX_HISTORY_MESSAGES)
 
-    # انتخاب کلاینت بر اساس provider مدل
-    if provider == "cf":
-        client = cf_client
-    else:  # nvidia
-        client = nvidia_client
-        if client is None:
-            # NVIDIA تنظیم نشده — fallback به Cloudflare
-            client = cf_client
-            provider = "cf"
-            model_key = Config.DEFAULT_MODEL_KEY
-            _, _, model_id = resolve_model(db, user_id) if False else (Config.DEFAULT_MODEL_KEY, "cf", Config.CF_AI_MODEL)
-
     def on_usage(info: dict) -> None:
-        # هروقت کلید NVIDIA واقعاً عوض بشه، توی تاپیک آمار خبر می‌دیم.
-        # (Cloudflare کلید نداره، برای همین این فقط برای NVIDIA کار می‌کنه)
-        if info.get("switched") and info.get("previous_masked_key"):
+        # هروقت توکن واقعاً عوض بشه، توی تاپیک آمار خبر می‌دیم.
+        if info.get("switched"):
             try:
                 tg.send_message(
                     chat_id,
-                    f"🔁 کلید به کلید بعدی تغییر یافت: `{info.get('previous_masked_key')}` → `{info.get('masked_key')}`",
+                    f"🔁 توکن به توکن بعدی تغییر یافت: `{token_manager.active_token_masked() or '?'}`",
                     message_thread_id=stats_topic_id,
                 )
             except Exception:
@@ -475,7 +415,6 @@ def run_agent_and_reply(
                 )
             streamer.finalize(result.final_answer)
         except Exception as e:
-            # اگه هر خطای غیرمنتظره‌ای پیش اومد، استریم رو finalize کن و یه پیام خطا بفرست
             err_text = f"⚠️ خطای غیرمنتظره: {e}"
             print(f"⚠️ run_agent_and_reply error: {type(e).__name__}: {e}")
             traceback.print_exc()
@@ -486,15 +425,12 @@ def run_agent_and_reply(
                     tg.send_message(chat_id, err_text, message_thread_id=answer_topic_id)
                 except Exception:
                     pass
-            # یه نتیجه‌ی خالی بساز تا بقیه‌ی کد کرش نکنه
             from agent import AgentResult
             result = AgentResult(thoughts=[], final_answer=err_text)
     else:
         try:
             with TypingLoop(tg, chat_id, answer_topic_id):
-                result = run_agent(
-                    client, history, user_content, model=model_id, on_usage=on_usage, tool_context=tool_context
-                )
+                result = run_agent(client, history, user_content, model=model_id, on_usage=on_usage, tool_context=tool_context)
             send_long(tg, chat_id, result.final_answer, answer_topic_id)
         except Exception as e:
             err_text = f"⚠️ خطای غیرمنتظره: {e}"
@@ -504,7 +440,7 @@ def run_agent_and_reply(
             from agent import AgentResult
             result = AgentResult(thoughts=[], final_answer=err_text)
 
-    # ارسال خودکار عکس‌هایی که مدل تو پاسخش گذاشته (Markdown image syntax)
+    # ارسال خودکار عکس‌هایی که مدل تو پاسخش گذاشته
     _maybe_send_images_from_reply(tg, chat_id, answer_topic_id, result.final_answer)
 
     if result.thoughts:
@@ -512,19 +448,9 @@ def run_agent_and_reply(
     else:
         tg.send_message(chat_id, "(این بار فکر خاصی ثبت نشد)", message_thread_id=thoughts_topic_id)
 
-    # آمار کامل و به‌روزِ کلیدها رو بعد از هر پاسخ توی تاپیک آمار می‌فرستیم.
+    # آمار به‌روز توکن‌ها رو بعد از هر پاسخ توی تاپیک آمار می‌فرستیم.
     try:
-        if key_manager:
-            tg.send_message(chat_id, format_keys_stats_text(key_manager), message_thread_id=stats_topic_id)
-        else:
-            # فقط Cloudflare فعال هست
-            stats_msg = (
-                "☁️ *پروایدر: Cloudflare Workers AI*\n"
-                f"مدل: `{model_key}`\n"
-                f"تعداد پیام‌های شما: {db.count_messages(user_id)}\n"
-                f"زمان روشن بودن: {int((time.time() - START_TIME) // 60)} دقیقه"
-            )
-            tg.send_message(chat_id, stats_msg, message_thread_id=stats_topic_id)
+        tg.send_message(chat_id, format_tokens_stats_text(token_manager), message_thread_id=stats_topic_id)
     except Exception:
         pass
 
@@ -533,7 +459,7 @@ def run_agent_and_reply(
     db.trim_history(user_id, Config.MAX_HISTORY_MESSAGES)
 
 
-def handle_message(tg: TelegramAPI, db: Storage, key_manager, cf_client, nvidia_client, message: dict) -> None:
+def handle_message(tg: TelegramAPI, db: Storage, token_manager: CloudflareTokenManager, client: CloudflareAIClient, message: dict) -> None:
     chat = message.get("chat", {})
     chat_id = chat.get("id")
     user_id = message.get("from", {}).get("id")
@@ -550,14 +476,14 @@ def handle_message(tg: TelegramAPI, db: Storage, key_manager, cf_client, nvidia_
         tg.send_message(chat_id, "⛔ متاسفانه اجازه استفاده از این ربات رو نداری.")
         return
 
-    # هر کاربر فقط یه پیام رو در آنِ واحد پردازش می‌کنه (پیام‌های کاربرهای مختلف موازی هستن)
+    # هر کاربر فقط یه پیام رو در آنِ واحد پردازش می‌کنه
     with _get_user_lock(user_id):
         if text and text.strip() == "/start":
             tg.send_message(
                 chat_id,
                 "سلام! پیامت رو بفرست تا شروع کنیم. من سه تاپیک برات می‌سازم: یکی برای "
-                "فکرهام، یکی برای پاسخ نهایی و یکی برای وضعیت کلیدها/توکن‌ها. "
-                "دستورات: /stats /models /model /reset /export /help",
+                "فکرهام، یکی برای پاسخ نهایی و یکی برای وضعیت توکن‌ها. "
+                "دستورات: /stats /models /model /reset /export /clear_tokens /help",
             )
             ensure_topics(tg, db, chat_id, user_id)
             return
@@ -565,7 +491,7 @@ def handle_message(tg: TelegramAPI, db: Storage, key_manager, cf_client, nvidia_
         thoughts_topic_id, answer_topic_id, stats_topic_id = ensure_topics(tg, db, chat_id, user_id)
 
         if text and handle_command(
-            tg, db, key_manager, chat_id, user_id, thoughts_topic_id, answer_topic_id, stats_topic_id, text
+            tg, db, token_manager, chat_id, user_id, thoughts_topic_id, answer_topic_id, stats_topic_id, text
         ):
             return
 
@@ -584,7 +510,7 @@ def handle_message(tg: TelegramAPI, db: Storage, key_manager, cf_client, nvidia_
                 {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}},
             ]
             run_agent_and_reply(
-                tg, db, key_manager, cf_client, nvidia_client, chat_id, user_id, thoughts_topic_id, answer_topic_id, stats_topic_id,
+                tg, db, token_manager, client, chat_id, user_id, thoughts_topic_id, answer_topic_id, stats_topic_id,
                 user_content, f"[عکس ارسال شد] {caption}",
             )
             return
@@ -632,14 +558,14 @@ def handle_message(tg: TelegramAPI, db: Storage, key_manager, cf_client, nvidia_
                 db_text = f"[فایل باینری ضمیمه: {file_name}] {caption}"
 
             run_agent_and_reply(
-                tg, db, key_manager, cf_client, nvidia_client, chat_id, user_id, thoughts_topic_id, answer_topic_id, stats_topic_id,
+                tg, db, token_manager, client, chat_id, user_id, thoughts_topic_id, answer_topic_id, stats_topic_id,
                 user_content, db_text,
             )
             return
 
         # --- متن معمولی ---
         run_agent_and_reply(
-            tg, db, key_manager, cf_client, nvidia_client, chat_id, user_id, thoughts_topic_id, answer_topic_id, stats_topic_id,
+            tg, db, token_manager, client, chat_id, user_id, thoughts_topic_id, answer_topic_id, stats_topic_id,
             text, text,
         )
 
@@ -658,7 +584,7 @@ class HealthHandler(BaseHTTPRequestHandler):
             self.end_headers()
 
     def log_message(self, format, *args):
-        pass  # لاگ‌های healthcheck رو ساکت نگه می‌داریم
+        pass
 
 
 def start_health_server(port: int) -> None:
@@ -674,28 +600,21 @@ def main() -> None:
     tg = TelegramAPI(Config.TELEGRAM_BOT_TOKEN)
     db = Storage(Config.DB_PATH)
 
-    # کلاینت اصلی: Cloudflare Workers AI
-    cf_client = CloudflareAIClient(
-        account_id=Config.CF_ACCOUNT_ID,
-        api_token=Config.CF_AI_TOKEN,
-        base_url=Config.CF_AI_BASE_URL,
-        model=Config.CF_AI_MODEL,
+    # مدیریت توکن‌های Cloudflare (پشتیبانی از چند توکن)
+    token_manager = CloudflareTokenManager(
+        Config.CF_AI_TOKENS, Config.CF_KEY_COOLDOWN_SECONDS
     )
-
-    # کلاینت fallback: NVIDIA (اگه کلید NVIDIA تنظیم شده باشه)
-    nvidia_client = None
-    key_manager = None
-    if Config.NVIDIA_API_KEYS:
-        key_manager = NvidiaKeyManager(
-            Config.NVIDIA_API_KEYS, Config.DEFAULT_KEY_COOLDOWN_SECONDS, Config.TOKEN_BUDGET_PER_KEY
-        )
-        nvidia_client = NvidiaAgentClient(key_manager, Config.NVIDIA_BASE_URL, Config.NVIDIA_MODEL)
+    client = CloudflareAIClient(
+        token_manager=token_manager,
+        base_url=Config.CF_AI_BASE_URL,
+        model=Config.MODELS.get(Config.DEFAULT_MODEL_KEY, "@cf/meta/llama-3.3-70b-instruct-fp8-fast"),
+    )
 
     start_health_server(Config.HEALTH_PORT)
 
     print(
         f"✅ ربات روشن شد. مدل پیش‌فرض: {Config.DEFAULT_MODEL_KEY} | "
-        f"Cloudflare: ✅ | NVIDIA: {'✅' if nvidia_client else '❌'} | "
+        f"تعداد توکن Cloudflare: {token_manager.total_tokens_count()} | "
         f"Concurrency: {Config.MAX_CONCURRENT_UPDATES}"
     )
 
@@ -707,7 +626,7 @@ def main() -> None:
     def _process(message: dict) -> None:
         from_id = message.get("from", {}).get("id")
         try:
-            handle_message(tg, db, key_manager, cf_client, nvidia_client, message)
+            handle_message(tg, db, token_manager, client, message)
             print(f"✅ پیام از {from_id} پردازش شد.")
         except Exception:
             print("⚠️ خطا در پردازش پیام:")

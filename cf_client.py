@@ -2,15 +2,10 @@
 کلاینت Cloudflare Workers AI.
 
 Cloudflare Workers AI یه API سازگار با OpenAI ارائه می‌ده که مدل‌های مختلفی داره
-از جمله GLM-5.2 (مدل reasoning فارسی‌زبان از Z-AI).
+از جمله GLM-5.2 (مدل reasoning فارسی‌زبان از Z-AI) و Llama-3.3-70B (سریع + باکیفیت).
 
-این کلاینت با NVIDIA کلاینت یه interface مشترک داره (chat و chat_stream با همون
-امضا) تا agent.py بتونه بدون تغییر با هر دو کار کنه.
-
-ویژگی‌های خاص Cloudflare:
-- خطای "Capacity temporarily exceeded" گاهی میاد — خودکار retry می‌شه
-- مدل GLM-5.2 هم content و هم reasoning_content برمی‌گردونه (تو streaming هم)
-- response شامل usage هست (prompt_tokens, completion_tokens, total_tokens)
+این کلاینت از CloudflareTokenManager استفاده می‌کنه تا چند توکن رو مدیریت کنه.
+اگه یه توکن rate-limit بخوره، خودکار میره سراغ بعدی.
 """
 import json
 import re
@@ -18,6 +13,7 @@ import time
 import httpx
 
 from config import Config
+from cf_key_manager import CloudflareTokenManager
 
 THINK_TAG_RE = re.compile(r"<think>(.*?)</think>", re.DOTALL | re.IGNORECASE)
 
@@ -31,17 +27,12 @@ class CloudflareAIClient:
     """
     کلاینت برای Cloudflare Workers AI.
 
-    Interface مشابه NvidiaAgentClient داره:
-    - chat(messages, tools, model, ...) -> dict (message)
-    - chat_stream(messages, tools, model, on_content_delta, ...) -> dict (message)
-
-    پیام برگشتی همون ساختار NvidiaAgentClient هست:
-    {"role": "assistant", "content": "...", "reasoning_content": "...", "tool_calls": [...]}
+    chat() و chat_stream() همون امضای کلاینت‌های قبلی رو دارن تا agent.py بدون تغییر کار کنه.
+    پیام برگشتی: {"role", "content", "reasoning_content", "tool_calls"}
     """
 
-    def __init__(self, account_id: str, api_token: str, base_url: str, model: str):
-        self.account_id = account_id
-        self.api_token = api_token
+    def __init__(self, token_manager: CloudflareTokenManager, base_url: str, model: str):
+        self.token_manager = token_manager
         self.base_url = base_url.rstrip("/")
         self.model = model
         # HTTP/2 + connection pool بزرگ‌تر برای کاهش latency
@@ -61,10 +52,17 @@ class CloudflareAIClient:
     ) -> dict:
         """یک چرخه‌ی chat completion می‌زنه و دیکشنری message نرمال‌شده رو برمی‌گردونه."""
         use_model = model or self.model
-        max_retries = Config.CF_MAX_RETRIES
+        max_retries = Config.CF_MAX_RETRIES + self.token_manager.total_tokens_count()
         last_error: Exception | None = None
 
-        for attempt in range(max_retries):
+        for _ in range(max_retries):
+            token = self.token_manager.get_next_token()
+            if token is None:
+                wait = self.token_manager.seconds_until_next_available()
+                raise CloudflareError(
+                    f"همه‌ی توکن‌ها موقتاً محدود شدن. حدود {wait:.0f} ثانیه دیگه دوباره امتحان کن."
+                )
+
             payload = {
                 "model": use_model,
                 "messages": messages,
@@ -78,55 +76,63 @@ class CloudflareAIClient:
                 resp = self._client.post(
                     f"{self.base_url}/chat/completions",
                     headers={
-                        "Authorization": f"Bearer {self.api_token}",
+                        "Authorization": f"Bearer {token}",
                         "Content-Type": "application/json",
                     },
                     json=payload,
                 )
-            except httpx.RequestError as e:
+            except (httpx.RequestError, httpx.StreamError) as e:
                 last_error = e
                 time.sleep(Config.CF_RETRY_DELAY)
                 continue
 
             if resp.status_code == 429:
-                # rate limit — صبر کن و retry کن
-                last_error = RuntimeError(f"429 rate limited: {resp.text[:200]}")
-                time.sleep(Config.CF_RETRY_DELAY * (attempt + 1))
+                self.token_manager.mark_rate_limited(token)
+                last_error = RuntimeError("429 rate limited")
                 continue
 
             if resp.status_code in (401, 403):
-                # خطای auth — retry بی‌فایده‌ست
-                raise CloudflareError(f"{resp.status_code} auth error: {resp.text[:200]}")
+                # توکن نامعتبر — برای مدت طولانی کنارش بذار
+                self.token_manager.mark_rate_limited(token, retry_after_seconds=6 * 3600)
+                last_error = RuntimeError(f"{resp.status_code} auth error")
+                continue
 
             if resp.status_code >= 400:
                 body = resp.text
-                # خطای Capacity — retry کن
+                # خطای Capacity — این توکن رو محدود کن و با توکن بعدی امتحان کن
                 if "Capacity" in body or "capacity" in body or resp.status_code == 503:
+                    self.token_manager.mark_rate_limited(token, retry_after_seconds=15)
                     last_error = RuntimeError(f"Capacity error ({resp.status_code})")
-                    time.sleep(Config.CF_RETRY_DELAY * (attempt + 1))
                     continue
                 raise CloudflareError(f"خطای Cloudflare API ({resp.status_code}): {body[:500]}")
 
             data = resp.json()
 
-            # Cloudflare خطا رو تو بدن response هم می‌تونه بذاره
+            # Cloudflare خطا رو تو بدنه هم می‌تونه بذاره
             if not data.get("success", True):
                 errors = data.get("errors") or []
                 err_msg = errors[0].get("message", "unknown") if errors else "unknown"
                 if "Capacity" in err_msg:
+                    self.token_manager.mark_rate_limited(token, retry_after_seconds=15)
                     last_error = RuntimeError(f"Capacity error: {err_msg}")
-                    time.sleep(Config.CF_RETRY_DELAY * (attempt + 1))
                     continue
                 raise CloudflareError(f"خطای Cloudflare: {err_msg}")
 
             message = data["choices"][0]["message"]
             usage = data.get("usage") or {}
-            if usage and on_usage:
+            # ثبت مصرف
+            switched = self.token_manager.record_usage(
+                token,
+                prompt_tokens=int(usage.get("prompt_tokens", 0)),
+                completion_tokens=int(usage.get("completion_tokens", 0)),
+            )
+            if on_usage:
                 try:
                     on_usage({
+                        "masked_token": self.token_manager.active_token_masked(),
+                        "switched": switched,
                         "prompt_tokens": usage.get("prompt_tokens", 0),
                         "completion_tokens": usage.get("completion_tokens", 0),
-                        "total_tokens": usage.get("total_tokens", 0),
                     })
                 except Exception:
                     pass
@@ -152,14 +158,20 @@ class CloudflareAIClient:
         در پایان، همون دیکشنری نرمال‌شده‌ی message رو برمی‌گردونه.
 
         نکته برای GLM-5.2: مدل اول reasoning_content رو استریم می‌کنه (فکر مدل به انگلیسی)
-        و بعد content رو (جواب نهایی به فارسی). این یعنی کاربر اول فکر مدل رو می‌بینه و بعد
-        جواب رو.
+        و بعد content رو (جواب نهایی به فارسی).
         """
         use_model = model or self.model
-        max_retries = Config.CF_MAX_RETRIES
+        max_retries = Config.CF_MAX_RETRIES + self.token_manager.total_tokens_count()
         last_error: Exception | None = None
 
-        for attempt in range(max_retries):
+        for _ in range(max_retries):
+            token = self.token_manager.get_next_token()
+            if token is None:
+                wait = self.token_manager.seconds_until_next_available()
+                raise CloudflareError(
+                    f"همه‌ی توکن‌ها موقتاً محدود شدن. حدود {wait:.0f} ثانیه دیگه دوباره امتحان کن."
+                )
+
             payload = {
                 "model": use_model,
                 "messages": messages,
@@ -181,24 +193,26 @@ class CloudflareAIClient:
                     "POST",
                     f"{self.base_url}/chat/completions",
                     headers={
-                        "Authorization": f"Bearer {self.api_token}",
+                        "Authorization": f"Bearer {token}",
                         "Content-Type": "application/json",
                     },
                     json=payload,
                 ) as resp:
                     if resp.status_code == 429:
                         resp.read()
+                        self.token_manager.mark_rate_limited(token)
                         last_error = RuntimeError("429 rate limited")
-                        time.sleep(Config.CF_RETRY_DELAY * (attempt + 1))
                         continue
                     if resp.status_code in (401, 403):
                         resp.read()
-                        raise CloudflareError(f"{resp.status_code} auth error")
+                        self.token_manager.mark_rate_limited(token, retry_after_seconds=6 * 3600)
+                        last_error = RuntimeError(f"{resp.status_code} auth error")
+                        continue
                     if resp.status_code >= 400:
                         body = resp.read().decode("utf-8", errors="replace")
                         if "Capacity" in body or resp.status_code == 503:
+                            self.token_manager.mark_rate_limited(token, retry_after_seconds=15)
                             last_error = RuntimeError(f"Capacity error ({resp.status_code})")
-                            time.sleep(Config.CF_RETRY_DELAY * (attempt + 1))
                             continue
                         raise CloudflareError(f"خطای Cloudflare API ({resp.status_code}): {body[:500]}")
 
@@ -215,7 +229,7 @@ class CloudflareAIClient:
                         except json.JSONDecodeError:
                             continue
 
-                        # Cloudflare گاهی usage رو تو chunk آخر می‌فرسته
+                        # usage معمولاً تو chunk آخر میاد
                         chunk_usage = chunk.get("usage")
                         if chunk_usage:
                             usage = chunk_usage
@@ -257,12 +271,19 @@ class CloudflareAIClient:
                 time.sleep(Config.CF_RETRY_DELAY)
                 continue
 
-            if usage and on_usage:
+            # ثبت مصرف
+            switched = self.token_manager.record_usage(
+                token,
+                prompt_tokens=int(usage.get("prompt_tokens", 0)),
+                completion_tokens=int(usage.get("completion_tokens", 0)),
+            )
+            if on_usage:
                 try:
                     on_usage({
+                        "masked_token": self.token_manager.active_token_masked(),
+                        "switched": switched,
                         "prompt_tokens": usage.get("prompt_tokens", 0),
                         "completion_tokens": usage.get("completion_tokens", 0),
-                        "total_tokens": usage.get("total_tokens", 0),
                     })
                 except Exception:
                     pass
@@ -282,7 +303,7 @@ class CloudflareAIClient:
 
 
 def _normalize_message(message: dict) -> dict:
-    """پیام رو نرمال می‌کنه — همون منطق NvidiaAgentClient."""
+    """پیام رو نرمال می‌کنه."""
     content = message.get("content") or ""
     reasoning = message.get("reasoning_content") or message.get("reasoning") or ""
 

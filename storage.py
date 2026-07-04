@@ -75,6 +75,15 @@ class Storage:
             )
             self._conn.commit()
 
+    def set_stats_topic(self, user_id: int, stats_topic_id: int) -> None:
+        """فقط stats_topic_id رو آپدیت کن (برای مهاجرت کاربران قدیمی)."""
+        with self._lock:
+            self._conn.execute(
+                "UPDATE user_topics SET stats_topic_id = ? WHERE user_id = ?",
+                (stats_topic_id, user_id),
+            )
+            self._conn.commit()
+
     def count_users(self) -> int:
         with self._lock:
             row = self._conn.execute("SELECT COUNT(*) FROM user_topics").fetchone()

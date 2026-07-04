@@ -15,55 +15,40 @@ class Config:
         int(x) for x in _split_csv(os.environ.get("ALLOWED_USER_IDS", "")) if x.isdigit()
     ]
 
-    # --- Cloudflare Workers AI (پروایدر اصلی) ---
-    # اطلاعات اکانت و توکن رو از پنل Cloudflare بگیر:
+    # --- Cloudflare Workers AI ---
+    # اطلاعات اکانت و توکن‌ها رو از پنل Cloudflare بگیر:
     # https://dash.cloudflare.com → My Profile → API Tokens → Create Token
     #   Permissions: Account → Workers AI → Edit
+    #
+    # چند توکن: اگه چندتا اکانت Cloudflare داری، می‌تونی چند توکن با کاما بذاری.
+    # ربات به‌صورت round-robin بینشون می‌چرخه و اگه یکی rate-limit بخوره، میره سراغ بعدی.
+    # مثال: CF_AI_TOKENS=cfut_xxx,cfut_yyy,cfut_zzz
     CF_ACCOUNT_ID: str = os.environ.get("CF_ACCOUNT_ID", "")
-    CF_AI_TOKEN: str = os.environ.get("CF_AI_TOKEN", "")
+    # برای backward compat: اگه CF_AI_TOKEN تنظیم شده باشه، از اون استفاده می‌کنه
+    CF_AI_TOKENS: list[str] = _split_csv(
+        os.environ.get("CF_AI_TOKENS", "") or os.environ.get("CF_AI_TOKEN", "")
+    )
     CF_AI_BASE_URL: str = os.environ.get(
         "CF_AI_BASE_URL",
         f"https://api.cloudflare.com/client/v4/accounts/{CF_ACCOUNT_ID}/ai/v1",
     )
-    # مدل پیش‌فرض: GLM-5.2 (مدل reasoning فارسی‌زبان از Z-AI)
-    CF_AI_MODEL: str = os.environ.get("AI_MODEL", "@cf/zai-org/glm-5.2")
-
-    # --- NVIDIA NIM (fallback — اختیاری) ---
-    # اگه Cloudflare خطا بده (مثل Capacity)، ربات خودکار میره سراغ NVIDIA.
-    # اگه کلید NVIDIA نداری، خالی بذار — ربات فقط از Cloudflare استفاده می‌کنه.
-    NVIDIA_API_KEYS: list[str] = _split_csv(os.environ.get("NVIDIA_API_KEYS", ""))
-    NVIDIA_BASE_URL: str = os.environ.get("NVIDIA_BASE_URL", "https://integrate.api.nvidia.com/v1")
-    NVIDIA_MODEL: str = os.environ.get("NVIDIA_MODEL", "meta/llama-3.1-8b-instruct")
-
-    # مدت زمان (ثانیه) استراحت یک کلید NVIDIA بعد از خطای rate-limit
-    DEFAULT_KEY_COOLDOWN_SECONDS: int = int(os.environ.get("DEFAULT_KEY_COOLDOWN_SECONDS", "60"))
-
-    # اگه مدل‌هات reasoning/thinking داخلی دارن (مثل glm-5.2 یا deepseek-r1)، روشن بودن این گزینه
-    # باعث می‌شه قبل از جواب دادن «فکر» کنه که کیفیت رو بالا می‌بره ولی کندترش می‌کنه.
-    # برای GLM-5.2 این مهم نیست چون مدل خودش reasoning می‌فرسته.
-    ENABLE_MODEL_THINKING: bool = os.environ.get("ENABLE_MODEL_THINKING", "false").lower() == "true"
-
-    # اگه بخوای سقف مصرف توکن هر کلید NVIDIA رو بدونی (برای نمایش «باقی‌مونده» در آمار)
-    TOKEN_BUDGET_PER_KEY: int = int(os.environ.get("TOKEN_BUDGET_PER_KEY", "0"))
 
     # --- مدل‌های قابل انتخاب با /model و /models ---
-    # کلید کوتاه -> (providor, شناسه واقعی مدل)
-    # provider: "cf" = Cloudflare, "nvidia" = NVIDIA NIM
-    MODELS: dict[str, tuple[str, str]] = {
-        # Cloudflare (پیشنهادی — رایگان و پایدار)
-        "glm-5.2": ("cf", "@cf/zai-org/glm-5.2"),
-        "llama-3.3-70b": ("cf", "@cf/meta/llama-3.3-70b-instruct-fp8-fast"),
-        "llama-3.1-8b-cf": ("cf", "@cf/meta/llama-3.1-8b-instruct"),
-        "qwen2.5-coder-32b": ("cf", "@cf/qwen/qwen2.5-coder-32b-instruct"),
-        "mistral-7b": ("cf", "@cf/mistral/mistral-7b-instruct-v0.3"),
-        "deepseek-r1": ("cf", "@cf/deepseek-ai/deepseek-r1-distill-qwen-32b"),
-        # NVIDIA (fallback)
-        "llama-3.1-8b": ("nvidia", "meta/llama-3.1-8b-instruct"),
-        "llama-3.2-3b": ("nvidia", "meta/llama-3.2-3b-instruct"),
-        "llama-3.2-90b-vision": ("nvidia", "meta/llama-3.2-90b-vision-instruct"),
-        "gemma-2-2b": ("nvidia", "google/gemma-2-2b-it"),
+    # این لیست فقط مدل‌هایی هستن که واقعاً روی Cloudflare کار می‌کنن (تست‌شده).
+    # کلید کوتاه -> شناسه واقعی مدل
+    MODELS: dict[str, str] = {
+        # سریع و قدرتمند (پیشنهادی — هم سریعه هم باکیفیت)
+        "llama-3.3-70b": "@cf/meta/llama-3.3-70b-instruct-fp8-fast",
+        # خیلی سریع و سبک
+        "llama-3.2-3b": "@cf/meta/llama-3.2-3b-instruct",
+        # reasoning (اول فکر می‌کنه بعد جواب می‌ده — کندتر ولی دقیق‌تر)
+        "glm-5.2": "@cf/zai-org/glm-5.2",
+        "deepseek-r1": "@cf/deepseek-ai/deepseek-r1-distill-qwen-32b",
+        # تخصصی کدنویسی
+        "qwen2.5-coder": "@cf/qwen/qwen2.5-coder-32b-instruct",
     }
-    DEFAULT_MODEL_KEY: str = os.environ.get("DEFAULT_MODEL_KEY", "glm-5.2")
+    # مدل پیش‌فرض: llama-3.3-70b (سریع + باکیفیت + فارسی خوب)
+    DEFAULT_MODEL_KEY: str = os.environ.get("DEFAULT_MODEL_KEY", "llama-3.3-70b")
 
     # --- Agent / Shell ---
     SHELL_ENABLED: bool = os.environ.get("SHELL_ENABLED", "true").lower() == "true"
@@ -104,6 +89,10 @@ class Config:
     CF_MAX_RETRIES: int = int(os.environ.get("CF_MAX_RETRIES", "3"))
     CF_RETRY_DELAY: float = float(os.environ.get("CF_RETRY_DELAY", "1.0"))
 
+    # --- مدیریت توکن‌های Cloudflare ---
+    # وقتی یه توکن rate-limit بخوره، چند ثانیه کنار گذاشته می‌شه
+    CF_KEY_COOLDOWN_SECONDS: int = int(os.environ.get("CF_KEY_COOLDOWN_SECONDS", "30"))
+
     @classmethod
     def validate(cls) -> None:
         missing = []
@@ -111,13 +100,11 @@ class Config:
             missing.append("TELEGRAM_BOT_TOKEN")
         if not cls.CF_ACCOUNT_ID:
             missing.append("CF_ACCOUNT_ID")
-        if not cls.CF_AI_TOKEN:
-            missing.append("CF_AI_TOKEN")
+        if not cls.CF_AI_TOKENS:
+            missing.append("CF_AI_TOKENS (یا CF_AI_TOKEN)")
         if missing:
             raise RuntimeError(f"متغیرهای محیطی الزامی تنظیم نشدن: {', '.join(missing)}")
         if not cls.ALLOWED_USER_IDS:
             print("⚠️  هشدار: ALLOWED_USER_IDS خالیه یعنی هر کسی می‌تونه از ربات (و دسترسی شل!) استفاده کنه.")
         if cls.DEFAULT_MODEL_KEY not in cls.MODELS:
             print(f"⚠️  هشدار: DEFAULT_MODEL_KEY={cls.DEFAULT_MODEL_KEY!r} توی MODELS نیست.")
-        if not cls.NVIDIA_API_KEYS:
-            print("ℹ️  NVIDIA_API_KEYS خالیه — ربات فقط از Cloudflare استفاده می‌کنه (بدون fallback).")
