@@ -7,7 +7,7 @@ import threading
 class Storage:
     def __init__(self, db_path: str):
         os.makedirs(os.path.dirname(db_path) or ".", exist_ok=True)
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
         self._conn = sqlite3.connect(db_path, check_same_thread=False)
         self._init_schema()
 
@@ -66,6 +66,11 @@ class Storage:
             )
             self._conn.commit()
 
+    def count_users(self) -> int:
+        with self._lock:
+            row = self._conn.execute("SELECT COUNT(*) FROM user_topics").fetchone()
+        return row[0] if row else 0
+
     # --- history ---
     def add_message(self, user_id: int, role: str, content: str) -> None:
         with self._lock:
@@ -83,6 +88,14 @@ class Storage:
             ).fetchall()
         return [{"role": r, "content": c} for r, c in reversed(rows)]
 
+    def get_full_history(self, user_id: int) -> list[dict]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT role, content, created_at FROM history WHERE user_id = ? ORDER BY id ASC",
+                (user_id,),
+            ).fetchall()
+        return [{"role": r, "content": c, "created_at": t} for r, c, t in rows]
+
     def trim_history(self, user_id: int, keep_last: int) -> None:
         with self._lock:
             self._conn.execute(
@@ -95,7 +108,24 @@ class Storage:
             )
             self._conn.commit()
 
-    # --- bot state (مثل offset آخرین آپدیت تلگرام) ---
+    def reset_history(self, user_id: int) -> int:
+        """تاریخچه‌ی یک کاربر رو پاک می‌کنه. تعداد ردیف‌های حذف‌شده رو برمی‌گردونه."""
+        with self._lock:
+            cur = self._conn.execute("DELETE FROM history WHERE user_id = ?", (user_id,))
+            self._conn.commit()
+            return cur.rowcount
+
+    def count_messages(self, user_id: int | None = None) -> int:
+        with self._lock:
+            if user_id is None:
+                row = self._conn.execute("SELECT COUNT(*) FROM history").fetchone()
+            else:
+                row = self._conn.execute(
+                    "SELECT COUNT(*) FROM history WHERE user_id = ?", (user_id,)
+                ).fetchone()
+        return row[0] if row else 0
+
+    # --- bot state (مثل offset آخرین آپدیت تلگرام، مدل فعال و ...) ---
     def get_state(self, key: str) -> str | None:
         with self._lock:
             row = self._conn.execute("SELECT value FROM bot_state WHERE key = ?", (key,)).fetchone()
@@ -111,3 +141,10 @@ class Storage:
                 (key, value),
             )
             self._conn.commit()
+
+    # --- مدل فعلیِ هر کاربر (سوییچ مدل شخصی‌سازی‌شده) ---
+    def get_user_model(self, user_id: int) -> str | None:
+        return self.get_state(f"user_model:{user_id}")
+
+    def set_user_model(self, user_id: int, model_key: str) -> None:
+        self.set_state(f"user_model:{user_id}", model_key)

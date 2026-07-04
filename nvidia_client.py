@@ -1,3 +1,4 @@
+import json
 import re
 import httpx
 
@@ -22,8 +23,15 @@ class NvidiaAgentClient:
         self.model = model
         self._client = httpx.Client(timeout=120.0)
 
-    def chat(self, messages: list[dict], tools: list[dict] | None = None, max_key_attempts: int | None = None) -> dict:
+    def chat(
+        self,
+        messages: list[dict],
+        tools: list[dict] | None = None,
+        model: str | None = None,
+        max_key_attempts: int | None = None,
+    ) -> dict:
         """یک چرخه‌ی chat completion می‌زنه و دیکشنری message خام (شامل content, reasoning_content, tool_calls) رو برمی‌گردونه."""
+        use_model = model or self.model
         attempts = max_key_attempts or self.key_manager.total_keys()
         last_error: Exception | None = None
 
@@ -35,7 +43,7 @@ class NvidiaAgentClient:
                     f"همه‌ی کلیدها موقتاً محدود شدن. حدود {wait:.0f} ثانیه دیگه دوباره امتحان کن."
                 )
 
-            payload = {"model": self.model, "messages": messages}
+            payload = {"model": use_model, "messages": messages}
             payload["chat_template_kwargs"] = {"enable_thinking": True, "clear_thinking": False}
             if tools:
                 payload["tools"] = tools
@@ -67,11 +75,128 @@ class NvidiaAgentClient:
 
             data = resp.json()
             message = data["choices"][0]["message"]
-            print(f"🔍 DEBUG کلیدهای پاسخ خام: {list(message.keys())}")
-            if message.get("reasoning_content"):
-                print(f"🔍 DEBUG طول reasoning_content: {len(message['reasoning_content'])}")
-            else:
-                print("🔍 DEBUG reasoning_content خالی یا وجود نداره")
+            return _normalize_message(message)
+
+        raise AllKeysExhaustedError(
+            f"بعد از {attempts} تلاش با کلیدهای مختلف، درخواست موفق نشد. آخرین خطا: {last_error}"
+        )
+
+    def chat_stream(
+        self,
+        messages: list[dict],
+        tools: list[dict] | None = None,
+        model: str | None = None,
+        max_key_attempts: int | None = None,
+        on_content_delta=None,
+        on_reasoning_delta=None,
+    ) -> dict:
+        """
+        نسخه‌ی استریم‌شده: با stream=True به NIM وصل می‌شه و chunk‌های SSE رو می‌خونه.
+        به محض رسیدن هر تکه از content/reasoning، callback مربوطه صدا زده می‌شه (برای
+        ادیت زنده‌ی پیام تلگرام). در پایان، همون دیکشنری نرمال‌شده‌ی message رو
+        (مثل chat()) برمی‌گردونه تا بقیه‌ی حلقه‌ی agent بدون تغییر کار کنه.
+        """
+        use_model = model or self.model
+        attempts = max_key_attempts or self.key_manager.total_keys()
+        last_error: Exception | None = None
+
+        for _ in range(attempts):
+            api_key = self.key_manager.get_next_key()
+            if api_key is None:
+                wait = self.key_manager.seconds_until_next_available()
+                raise AllKeysExhaustedError(
+                    f"همه‌ی کلیدها موقتاً محدود شدن. حدود {wait:.0f} ثانیه دیگه دوباره امتحان کن."
+                )
+
+            payload = {"model": use_model, "messages": messages, "stream": True}
+            payload["chat_template_kwargs"] = {"enable_thinking": True, "clear_thinking": False}
+            if tools:
+                payload["tools"] = tools
+                payload["tool_choice"] = "auto"
+
+            content_parts: list[str] = []
+            reasoning_parts: list[str] = []
+            tool_calls_acc: dict[int, dict] = {}
+            role = "assistant"
+
+            try:
+                with self._client.stream(
+                    "POST",
+                    f"{self.base_url}/chat/completions",
+                    headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+                    json=payload,
+                ) as resp:
+                    if resp.status_code == 429:
+                        resp.read()
+                        retry_after = _parse_retry_after(resp.headers.get("retry-after"))
+                        self.key_manager.mark_rate_limited(api_key, retry_after)
+                        last_error = RuntimeError("429 rate limited")
+                        continue
+                    if resp.status_code in (401, 403):
+                        resp.read()
+                        self.key_manager.mark_invalid(api_key)
+                        last_error = RuntimeError(f"{resp.status_code} auth error")
+                        continue
+                    if resp.status_code >= 400:
+                        body = resp.read()
+                        raise RuntimeError(f"خطای NVIDIA API ({resp.status_code}): {body[:500]}")
+
+                    for line in resp.iter_lines():
+                        if not line:
+                            continue
+                        if not line.startswith("data:"):
+                            continue
+                        data_str = line[len("data:"):].strip()
+                        if data_str == "[DONE]":
+                            break
+                        try:
+                            chunk = json.loads(data_str)
+                        except json.JSONDecodeError:
+                            continue
+
+                        choices = chunk.get("choices") or []
+                        if not choices:
+                            continue
+                        delta = choices[0].get("delta") or {}
+                        role = delta.get("role", role)
+
+                        content_piece = delta.get("content")
+                        if content_piece:
+                            content_parts.append(content_piece)
+                            if on_content_delta:
+                                on_content_delta(content_piece)
+
+                        reasoning_piece = delta.get("reasoning_content") or delta.get("reasoning")
+                        if reasoning_piece:
+                            reasoning_parts.append(reasoning_piece)
+                            if on_reasoning_delta:
+                                on_reasoning_delta(reasoning_piece)
+
+                        for tc_delta in delta.get("tool_calls") or []:
+                            idx = tc_delta.get("index", 0)
+                            entry = tool_calls_acc.setdefault(
+                                idx,
+                                {"id": None, "type": "function", "function": {"name": "", "arguments": ""}},
+                            )
+                            if tc_delta.get("id"):
+                                entry["id"] = tc_delta["id"]
+                            fn_delta = tc_delta.get("function") or {}
+                            if fn_delta.get("name"):
+                                entry["function"]["name"] += fn_delta["name"]
+                            if fn_delta.get("arguments"):
+                                entry["function"]["arguments"] += fn_delta["arguments"]
+
+            except httpx.RequestError as e:
+                last_error = e
+                continue
+
+            tool_calls = [tool_calls_acc[i] for i in sorted(tool_calls_acc)] if tool_calls_acc else []
+            message = {
+                "role": role,
+                "content": "".join(content_parts),
+                "reasoning_content": "".join(reasoning_parts),
+                "tool_calls": tool_calls,
+            }
             return _normalize_message(message)
 
         raise AllKeysExhaustedError(

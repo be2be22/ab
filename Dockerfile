@@ -19,4 +19,6 @@ RUN mkdir -p /data
 
 ENV PYTHONUNBUFFERED=1
 
+EXPOSE 8080
+
 CMD ["python", "-u", "main.py"]
