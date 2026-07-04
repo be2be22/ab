@@ -1,4 +1,5 @@
 import time
+import threading
 import traceback
 
 from config import Config
@@ -45,6 +46,34 @@ def send_long(tg: TelegramAPI, chat_id: int, text: str, message_thread_id: int) 
         tg.send_message(chat_id, chunk, message_thread_id=message_thread_id)
 
 
+class TypingLoop:
+    """تا وقتی ایجنت داره کار می‌کنه، هر چند ثانیه یک‌بار 'در حال نوشتن...' رو دوباره می‌فرسته."""
+
+    def __init__(self, tg: TelegramAPI, chat_id: int, message_thread_id: int, interval: float = 4.0):
+        self._tg = tg
+        self._chat_id = chat_id
+        self._thread_id = message_thread_id
+        self._interval = interval
+        self._stop_event = threading.Event()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+
+    def _run(self):
+        while not self._stop_event.is_set():
+            try:
+                self._tg.send_chat_action(self._chat_id, "typing", message_thread_id=self._thread_id)
+            except Exception:
+                pass
+            self._stop_event.wait(self._interval)
+
+    def __enter__(self):
+        self._thread.start()
+        return self
+
+    def __exit__(self, *exc):
+        self._stop_event.set()
+        self._thread.join(timeout=1)
+
+
 def handle_message(tg: TelegramAPI, db: Storage, client: NvidiaAgentClient, message: dict) -> None:
     chat = message.get("chat", {})
     chat_id = chat.get("id")
@@ -67,7 +96,8 @@ def handle_message(tg: TelegramAPI, db: Storage, client: NvidiaAgentClient, mess
     tg.send_chat_action(chat_id, "typing", message_thread_id=answer_topic_id)
 
     history = db.get_history(user_id, Config.MAX_HISTORY_MESSAGES)
-    result = run_agent(client, history, text)
+    with TypingLoop(tg, chat_id, answer_topic_id):
+        result = run_agent(client, history, text)
 
     if result.thoughts:
         send_long(tg, chat_id, "\n\n---\n\n".join(result.thoughts), thoughts_topic_id)
