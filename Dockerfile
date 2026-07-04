@@ -17,4 +17,6 @@ COPY . .
 # مسیر ذخیره‌سازی SQLite - اگه یه Volume روی Railway وصل کنی به /data، دیتا بین دیپلوی‌ها می‌مونه
 RUN mkdir -p /data
 
-CMD ["python", "main.py"]
+ENV PYTHONUNBUFFERED=1
+
+CMD ["python", "-u", "main.py"]

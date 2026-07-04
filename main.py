@@ -125,4 +125,10 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    print("🚀 در حال شروع ربات...")
+    try:
+        main()
+    except Exception:
+        print("❌ ربات با خطا متوقف شد:")
+        traceback.print_exc()
+        raise
