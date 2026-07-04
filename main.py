@@ -177,16 +177,22 @@ class StreamEditor:
 
     def _flush(self, text: str, force: bool = False) -> None:
         text = text.strip() or "..."
+        # ⚡ بهینه‌سازی سرعت: در حین استریم (force=False)، متن اغلب مارک‌داون ناقص/نامعتبر
+        # داره (مثلا ** یا ``` بسته‌نشده)، که باعث خطای "can't parse entities" تو تلگرام
+        # می‌شد و هر ادیت مجبور می‌شد ۲ بار درخواست بزنه (یک بار با parse_mode، یک بار بدون).
+        # این round-trip دوم رو با غیرفعال کردن parse_mode در حالت استریم حذف می‌کنیم؛
+        # فرمت نهایی (Markdown) فقط روی پیام قطعی (force=True) اعمال می‌شه.
+        parse_mode = "Markdown" if force else None
         for chunk in split_long_text(text):
             display = chunk + ("\n▌" if not force else "")
             try:
                 if self._message_id is None:
                     result = self._tg.send_message(
-                        self._chat_id, display, message_thread_id=self._thread_id
+                        self._chat_id, display, message_thread_id=self._thread_id, parse_mode=parse_mode
                     )
                     self._message_id = result["message_id"]
                 else:
-                    self._tg.edit_message_text(self._chat_id, self._message_id, display)
+                    self._tg.edit_message_text(self._chat_id, self._message_id, display, parse_mode=parse_mode)
             except Exception as e:
                 # اگه edit خطا بده، یه پیام جدید بفرست
                 if self._message_id is not None and force:
@@ -280,8 +286,8 @@ def handle_command(
         for key, model_id in Config.MODELS.items():
             marker = "✅" if key == model_key else "▫️"
             lines.append(f"{marker} `{key}` → {model_id}")
-        lines.append("\n*پیشنهادی:* `llama-3.3-70b` (سریع + باکیفیت)")
-        lines.append("\nبرای تعویض: `/model <نام>` مثلا `/model llama-3.3-70b`")
+        lines.append("\n*پیش‌فرض:* `glm-5.2` (reasoning، دقیق‌تر) — برای پاسخ سریع‌تر: `llama-3.3-70b`")
+        lines.append("\nبرای تعویض: `/model <نام>` مثلا `/model glm-5.2`")
         tg.send_message(chat_id, "\n".join(lines), message_thread_id=answer_topic_id)
         return True
 
@@ -290,7 +296,7 @@ def handle_command(
         if len(parts) < 2 or not parts[1].strip():
             tg.send_message(
                 chat_id,
-                "برای دیدن لیست مدل‌ها از /models استفاده کن. مثال تعویض: `/model llama-3.3-70b`",
+                "برای دیدن لیست مدل‌ها از /models استفاده کن. مثال تعویض: `/model glm-5.2`",
                 message_thread_id=answer_topic_id,
             )
             return True
@@ -366,8 +372,8 @@ def handle_command(
             "• 💬 پاسخ نهایی - جواب نهایی\n"
             "• 🔑 آمار و توکن‌ها - وضعیت توکن‌های Cloudflare\n\n"
             "*مدل‌های پیشنهادی:*\n"
-            "• `llama-3.3-70b` - سریع و باکیفیت (پیش‌فرض)\n"
-            "• `glm-5.2` - reasoning (دقیق‌تر ولی کندتر)\n\n"
+            "• `glm-5.2` - reasoning، دقیق‌تر (پیش‌فرض)\n"
+            "• `llama-3.3-70b` - سریع‌تر، برای پاسخ فوری\n\n"
             "برای سوال زمان‌مندی (قیمت، اخبار، آب‌وهوا) فقط بپرس، خودم جستجو می‌کنم!"
         )
         tg.send_message(chat_id, help_text, message_thread_id=answer_topic_id)

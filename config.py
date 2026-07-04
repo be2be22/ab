@@ -47,8 +47,8 @@ class Config:
         # تخصصی کدنویسی
         "qwen2.5-coder": "@cf/qwen/qwen2.5-coder-32b-instruct",
     }
-    # مدل پیش‌فرض: llama-3.3-70b (سریع + باکیفیت + فارسی خوب)
-    DEFAULT_MODEL_KEY: str = os.environ.get("DEFAULT_MODEL_KEY", "llama-3.3-70b")
+    # مدل پیش‌فرض: glm-5.2 (reasoning — دقیق‌تر و باکیفیت‌تر از مدل‌های non-reasoning)
+    DEFAULT_MODEL_KEY: str = os.environ.get("DEFAULT_MODEL_KEY", "glm-5.2")
 
     # --- Agent / Shell ---
     SHELL_ENABLED: bool = os.environ.get("SHELL_ENABLED", "true").lower() == "true"
