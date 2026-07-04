@@ -5,20 +5,23 @@ from nvidia_client import NvidiaAgentClient, AllKeysExhaustedError
 from tools import TOOLS, TOOL_IMPLEMENTATIONS
 
 SYSTEM_PROMPT = (
-    "تو یک ایجنت هوش مصنوعی هستی که روی یک سرور لینوکسی اجرا می‌شی و به ترمینال همون سرور "
-    "از طریق ابزار run_shell_command و run_python دسترسی داری. وقتی لازمه فایلی رو بررسی کنی، "
-    "پکیجی نصب کنی، یا هر کار عملی دیگه‌ای انجام بدی، از ابزار مناسب استفاده کن.\n\n"
-    "🔍 جستجوی وب: تو به وب دسترسی داری! از ابزار `web_search` برای جستجوی عبارت‌ها تو گوگل "
-    "(از طریق Bing) استفاده کن. اگه به اطلاعات به‌روز، اخبار، قیمت‌ها، مستندات، "
-    "یا هر چیزی که بعد از تاریخ آموزشت هست نیاز داشتی، حتماً جستجو کن. بعد از پیدا کردن "
-    "نتیجه‌ی مناسب، با `web_fetch` می‌تونی محتوای کامل صفحه‌ی موردنظر رو هم بخونی.\n\n"
-    "قوانین:\n"
-    "- قبل از اجرای دستورات مخرب یا غیرقابل‌برگشت (حذف فایل‌های مهم و غیره) با احتیاط کامل عمل کن.\n"
-    "- اگه کاربر سوال زمان‌مندی پرسید (قیمت امروز، اخبار، وضعیت آب‌وهوا) حتماً جستجو کن.\n"
-    "- اگه لازم شد یک فایل، عکس، نمودار، یا خروجیِ ساخته‌شده رو مستقیماً برای کاربر در تلگرام "
-    "بفرستی (نه فقط توی متن پاسخ توضیحش بدی)، اول با run_shell_command یا run_python فایل رو "
-    "روی سرور بساز و بعد با ابزار send_telegram_file مسیرش رو بده تا مستقیماً آپلود و ارسال بشه.\n"
-    "- پاسخ نهایی رو همیشه به فارسی و روشن بنویس. برای کد از بلاک‌های مارک‌داون (```) استفاده کن."
+    "تو یک دستیار هوشمند فارسی‌زبان هستی که روی یک سرور لینوکسی اجرا می‌شی. "
+    "به ترمینال سرور از طریق run_shell_command و run_python دسترسی داری و می‌تونی "
+    "تو وب با web_search و web_fetch جستجو کنی.\n\n"
+    "## قوانین مهم:\n\n"
+    "1. **ساده پاسخ بده:** برای سوالات ساده (مثل سلام، معرفی خودت، شعر، توضیح مفهوم) "
+    "مستقیم جواب بده و از ابزارها استفاده نکن. ابزارها فقط برای کارهای واقعی لازم هستن.\n\n"
+    "2. **جستجوی وب:** فقط وقتی به اطلاعات به‌روز نیاز داری (قیمت امروز، اخبار، "
+    "آب‌وهوا، نسخه‌ی جدید یه نرم‌افزار) از web_search استفاده کن. برای سوالات عمومی "
+    "نیازی به جستجو نیست.\n\n"
+    "3. **اجرای کد:** وقتی کاربر خواست یه محاسبه انجام بشه، فایل بررسی بشه، یا "
+    "هر کار عملی دیگه، از run_python یا run_shell_command استفاده کن.\n\n"
+    "4. **ارسال فایل:** فقط وقتی کاربر صریحاً خواست یه فایل بفرستی (مثلاً «یه عکس "
+    "بساز و بفرست» یا «یه PDF بده») از send_telegram_file استفاده کن. برای پاسخ‌های "
+    "متنی معمولی نیازی به این ابزار نیست.\n\n"
+    "5. **زبان:** پاسخ نهایی رو همیشه به فارسی روان بنویس. برای کد از بلاک‌های "
+    "مارک‌داون (```) استفاده کن.\n\n"
+    "6. **احتیاط:** قبل از اجرای دستورات مخرب (حذف فایل‌های مهم) با احتیاط عمل کن."
 )
 
 
@@ -34,6 +37,22 @@ def _assistant_message_for_history(message: dict) -> dict:
     if message.get("tool_calls"):
         d["tool_calls"] = message["tool_calls"]
     return d
+
+
+def _looks_like_tool_call_json(text: str) -> bool:
+    """بررسی می‌کنه که آیا متن مدل به‌جای یه پاسخ واقعی، یه JSON tool_call هست.
+    بعضی مدل‌های کوچیک (مثل llama-3.1-8b) وقتی tools فعال هست، به‌جای متن عادی،
+    content رو به‌شکل JSON می‌فرستن مثل: {"name": "run_python", "parameters": {...}}.
+    این تابع این حالت رو تشخیص می‌ده تا بتونیم fallback کنیم."""
+    if not text:
+        return False
+    text = text.strip()
+    if not (text.startswith("{") and text.endswith("}")):
+        return False
+    # اگه شامل کلمات کلیدی tool_call هست، احتمالاً JSON tool_call هست
+    lowered = text.lower()
+    keywords = ["\"name\"", "\"parameters\"", "\"arguments\"", "run_python", "run_shell", "web_search", "web_fetch", "send_telegram"]
+    return any(k.lower() in lowered for k in keywords)
 
 
 def run_agent(
@@ -71,6 +90,10 @@ def run_agent(
         tools = TOOLS
     else:
         tools = [t for t in TOOLS if t["function"]["name"] in ("web_search", "web_fetch", "send_telegram_file")]
+    # بعضی مدل‌ها از tools پشتیبانی نمی‌کنن (مثل mixtral-8x7b) — اگه مدل جزو اینا باشه، tools رو None کن
+    MODELS_WITHOUT_TOOLS = {"mistralai/mixtral-8x7b-instruct-v0.1"}
+    if model in MODELS_WITHOUT_TOOLS:
+        tools = None
     tool_context = tool_context or {}
 
     for step in range(Config.MAX_AGENT_ITERATIONS):
@@ -144,6 +167,17 @@ def run_agent(
             continue
 
         final_answer = (message.get("content") or "").strip()
+        # اگه مدل کوچیکه و content رو به‌جای متن، به‌شکل JSON tool_call فرستاده (باگ رایج)،
+        # دوباره بدون tools امتحان کن تا یه متن تمیز بگیریم.
+        if final_answer and _looks_like_tool_call_json(final_answer) and step == 0 and tools:
+            try:
+                retry_msg = client.chat(messages[:-1] if False else messages, tools=None, model=model, on_usage=on_usage)
+                retry_content = (retry_msg.get("content") or "").strip()
+                if retry_content and not _looks_like_tool_call_json(retry_content):
+                    final_answer = retry_content
+            except Exception:
+                pass
+
         if not final_answer and not thoughts:
             final_answer = "(پاسخ خالی برگشت)"
         elif not final_answer:

@@ -23,8 +23,9 @@ class NvidiaAgentClient:
         self.base_url = base_url.rstrip("/")
         self.model = model
         # HTTP/2 + connection pool بزرگ‌تر برای کاهش latency
+        # timeout کلی ۶۰s (به‌جای ۱۲۰s) تا اگه مدل هنگ کرد، زودتر fail بشیم
         self._client = httpx.Client(
-            timeout=httpx.Timeout(120.0, connect=10.0),
+            timeout=httpx.Timeout(60.0, connect=8.0),
             http2=True,
             limits=httpx.Limits(max_keepalive_connections=20, max_connections=50),
         )

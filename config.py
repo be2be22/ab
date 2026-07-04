@@ -19,13 +19,15 @@ class Config:
     # چند کلید با کاما جدا کن: NVIDIA_API_KEYS=nvapi-xxx,nvapi-yyy,nvapi-zzz
     NVIDIA_API_KEYS: list[str] = _split_csv(os.environ.get("NVIDIA_API_KEYS", ""))
     NVIDIA_BASE_URL: str = os.environ.get("NVIDIA_BASE_URL", "https://integrate.api.nvidia.com/v1")
-    NVIDIA_MODEL: str = os.environ.get("NVIDIA_MODEL", "z-ai/glm-5.2")
+    # مدل پیش‌فرض: llama-3.1-8b سریع‌ترین و پایدارترین مدل تست‌شده روی NVIDIA NIM
+    # اگه مدل‌های بزرگ‌تر خواستی، از /model استفاده کن
+    NVIDIA_MODEL: str = os.environ.get("NVIDIA_MODEL", "meta/llama-3.1-8b-instruct")
 
     # مدت زمان (ثانیه) استراحت یک کلید بعد از خطای rate-limit، اگه سرور retry-after نداد
     DEFAULT_KEY_COOLDOWN_SECONDS: int = int(os.environ.get("DEFAULT_KEY_COOLDOWN_SECONDS", "60"))
 
-    # اگه مدل‌هات reasoning/thinking داخلی دارن (مثل glm-5.2)، روشن بودن این گزینه
-    # باعث می‌شه قبل از جواب دادن «فکر» کنه که کیفیت رو بالا می‌بره ولی کند ترش می‌کنه.
+    # اگه مدل‌هات reasoning/thinking داخلی دارن (مثل glm-5.2 یا deepseek-r1)، روشن بودن این گزینه
+    # باعث می‌شه قبل از جواب دادن «فکر» کنه که کیفیت رو بالا می‌بره ولی کندترش می‌کنه.
     # پیش‌فرض خاموشه تا پاسخ‌ها سریع‌تر بیان؛ اگه کیفیت مهم‌تر از سرعته، بذارش true.
     ENABLE_MODEL_THINKING: bool = os.environ.get("ENABLE_MODEL_THINKING", "false").lower() == "true"
 
@@ -34,18 +36,21 @@ class Config:
     TOKEN_BUDGET_PER_KEY: int = int(os.environ.get("TOKEN_BUDGET_PER_KEY", "0"))
 
     # --- مدل‌های قابل انتخاب با /model و /models ---
-    # کلید کوتاه -> شناسه واقعی مدل روی NVIDIA NIM (build.nvidia.com)
+    # این لیست فقط مدل‌هایی هستن که واقعاً روی NVIDIA NIM کار می‌کنن (تست‌شده).
+    # کلید کوتاه -> شناسه واقعی مدل
+    # ⚠️ نکته: مدل‌های vision فقط برای عکس هستن، برای متن معمولی هم کار می‌کنن ولی کندترن.
     MODELS: dict[str, str] = {
-        "glm-5.2": "z-ai/glm-5.2",
-        "glm-4.5": "z-ai/glm-4.5",
-        "llama-3.1": "meta/llama-3.1-405b-instruct",
-        "llama-3.1-70b": "meta/llama-3.1-70b-instruct",
+        # سریع و سبک (پیشنهادی برای پاسخ‌های سریع)
         "llama-3.1-8b": "meta/llama-3.1-8b-instruct",
-        "qwen3": "qwen/qwen3-235b-a22b",
-        "deepseek-r1": "deepseek-ai/deepseek-r1",
-        "mistral-large": "mistralai/mistral-large-2-instruct",
+        "llama-3.2-3b": "meta/llama-3.2-3b-instruct",
+        "llama-3.2-1b": "meta/llama-3.2-1b-instruct",
+        "gemma-2-2b": "google/gemma-2-2b-it",
+        # قدرتمندتر (ولی کندتر)
+        "llama-3.2-90b-vision": "meta/llama-3.2-90b-vision-instruct",  # vision + text
+        "llama-3.2-11b-vision": "meta/llama-3.2-11b-vision-instruct",  # vision + text
+        "mixtral-8x7b": "mistralai/mixtral-8x7b-instruct-v0.1",  # بدون tools
     }
-    DEFAULT_MODEL_KEY: str = os.environ.get("DEFAULT_MODEL_KEY", "glm-5.2")
+    DEFAULT_MODEL_KEY: str = os.environ.get("DEFAULT_MODEL_KEY", "llama-3.1-8b")
 
     # --- Agent / Shell ---
     SHELL_ENABLED: bool = os.environ.get("SHELL_ENABLED", "true").lower() == "true"

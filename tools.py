@@ -325,6 +325,14 @@ def web_search(query: str, max_results: int | None = None) -> str:
     if not Config.WEB_SEARCH_ENABLED:
         return "[خطا] جستجوی وب روی این ربات غیرفعاله (WEB_SEARCH_ENABLED=false)."
 
+    # پاک‌سازی query: مدل بعضی وقتا کوتیشین اضافی می‌فرسته (مثل 'قیمت بیت کوین')
+    query = (query or "").strip()
+    if (query.startswith("'") and query.endswith("'")) or (query.startswith('"') and query.endswith('"')):
+        query = query[1:-1].strip()
+    # پاک‌سازی کوتیشین‌های داخل query که مدل ممکنه اضافه کرده باشه
+    if not query:
+        return "[خطا] query خالیه."
+
     limit = max_results or Config.WEB_SEARCH_MAX_RESULTS
     encoded = urllib.parse.quote_plus(query)
     # setlang و cc رو هم ست می‌کنیم تا نتایج مرتبط‌تر بیان
@@ -419,6 +427,23 @@ TOOL_IMPLEMENTATIONS = {
     "send_telegram_file": lambda args, context: send_telegram_file(
         args.get("file_path", ""), args.get("caption", ""), context
     ),
-    "web_search": lambda args, context: web_search(args.get("query", ""), args.get("max_results")),
-    "web_fetch": lambda args, context: web_fetch(args.get("url", ""), args.get("max_chars")),
+    "web_search": lambda args, context: web_search(
+        args.get("query", ""),
+        _safe_int(args.get("max_results")),
+    ),
+    "web_fetch": lambda args, context: web_fetch(
+        args.get("url", ""),
+        _safe_int(args.get("max_chars")),
+    ),
 }
+
+
+def _safe_int(value, default=None):
+    """یه مقدار رو به int تبدیل می‌کنه. اگه value یه string عددی باشه (مثل '5')،
+    به int تبدیلش می‌کنه. اگه None یا غیرعددی باشه، default برمی‌گرده."""
+    if value is None:
+        return default
+    try:
+        return int(value)
+    except (ValueError, TypeError):
+        return default

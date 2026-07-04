@@ -320,6 +320,13 @@ def handle_command(
         )
         return True
 
+    if lowered == "/clear_keys":
+        # reset کردن cooldown همه‌ی کلیدها (برای مواقعی که کلیدها موقتاً سوختن)
+        cleared = key_manager.reset_cooldowns()
+        msg = f"🔓 cooldown همه‌ی کلیدها پاک شد.\n{cleared} کلید از حالت محدود خارج شد.\nالان {key_manager.available_keys()}/{key_manager.total_keys()} کلید فعال هست."
+        tg.send_message(chat_id, msg, message_thread_id=stats_topic_id)
+        return True
+
     if lowered == "/help":
         help_text = (
             "🤖 *راهنمای ربات*\n\n"
@@ -329,6 +336,7 @@ def handle_command(
             "• `/model <name>` - تعویض مدل\n"
             "• `/reset` - پاک کردن تاریخچه\n"
             "• `/export` - خروجی JSON تاریخچه\n"
+            "• `/clear_keys` - پاک کردن cooldown کلیدها (وقتی کلیدها سوختن)\n"
             "• `/help` - این راهنما\n\n"
             "*قابلیت‌ها:*\n"
             "• 📝 ارسال متن برای چت با ایجنت\n"
@@ -342,6 +350,9 @@ def handle_command(
             "• 🧠 فکرها - مراحل فکر ایجنت\n"
             "• 💬 پاسخ نهایی - جواب نهایی\n"
             "• 🔑 آمار و کلیدها - وضعیت کلیدهای NVIDIA\n\n"
+            "*مدل‌های پیشنهادی:*\n"
+            "• `llama-3.1-8b` - سریع و سبک (پیش‌فرض)\n"
+            "• `llama-3.2-90b-vision` - قدرتمند + vision\n\n"
             "برای سوال زمان‌مندی (قیمت، اخبار، آب‌وهوا) فقط بپرس، خودم جستجو می‌کنم!"
         )
         tg.send_message(chat_id, help_text, message_thread_id=answer_topic_id)

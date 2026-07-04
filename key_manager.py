@@ -106,6 +106,17 @@ class NvidiaKeyManager:
         """کلید کلاً نامعتبره (401/403) — برای مدت طولانی کنارش می‌ذاریم."""
         self.mark_rate_limited(key, retry_after_seconds=6 * 3600)
 
+    def reset_cooldowns(self) -> int:
+        """تمام cooldown‌ها رو پاک می‌کنه (برای مواقعی که کاربر می‌خواد سریع تست کنه).
+        تعداد کلیدهایی که از cooldown خارج شدن رو برمی‌گردونه."""
+        with self._lock:
+            count = 0
+            for state in self._states:
+                if not state.is_available():
+                    count += 1
+                state.cooldown_until = 0.0
+            return count
+
     def record_usage(self, key: str, prompt_tokens: int, completion_tokens: int) -> bool:
         """
         بعد از یک درخواست *موفق*، مصرف توکن اون کلید رو ثبت می‌کنه.
