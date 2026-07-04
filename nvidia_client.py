@@ -22,7 +22,12 @@ class NvidiaAgentClient:
         self.key_manager = key_manager
         self.base_url = base_url.rstrip("/")
         self.model = model
-        self._client = httpx.Client(timeout=120.0)
+        # HTTP/2 + connection pool بزرگ‌تر برای کاهش latency
+        self._client = httpx.Client(
+            timeout=httpx.Timeout(120.0, connect=10.0),
+            http2=True,
+            limits=httpx.Limits(max_keepalive_connections=20, max_connections=50),
+        )
 
     def chat(
         self,

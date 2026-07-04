@@ -65,7 +65,9 @@ class Config:
 
     # --- استریم ---
     STREAM_ENABLED: bool = os.environ.get("STREAM_ENABLED", "true").lower() == "true"
-    STREAM_EDIT_MIN_INTERVAL: float = float(os.environ.get("STREAM_EDIT_MIN_INTERVAL", "0.8"))
+    STREAM_EDIT_MIN_INTERVAL: float = float(os.environ.get("STREAM_EDIT_MIN_INTERVAL", "0.5"))
+    # اولین ادیت زودتر انجام بشه تا کاربر زودتر چیزی ببینه (۱۵۰ms پیش‌فرض)
+    STREAM_FIRST_EDIT_DELAY: float = float(os.environ.get("STREAM_FIRST_EDIT_DELAY", "0.15"))
 
     # --- Concurrency ---
     MAX_CONCURRENT_UPDATES: int = int(os.environ.get("MAX_CONCURRENT_UPDATES", "8"))
@@ -75,6 +77,16 @@ class Config:
 
     # --- Storage ---
     DB_PATH: str = os.environ.get("DB_PATH", "/data/bot.db")
+
+    # --- جستجوی وب ---
+    # جستجوی گوگل از طریق Bing HTML scraping (بدون نیاز به API key)
+    WEB_SEARCH_ENABLED: bool = os.environ.get("WEB_SEARCH_ENABLED", "true").lower() == "true"
+    WEB_SEARCH_MAX_RESULTS: int = int(os.environ.get("WEB_SEARCH_MAX_RESULTS", "5"))
+    WEB_SEARCH_TIMEOUT_SECONDS: int = int(os.environ.get("WEB_SEARCH_TIMEOUT_SECONDS", "15"))
+
+    # --- ارسال خودکار عکس‌های داخل پاسخ مدل ---
+    # اگه مدل تو خروجی‌اش Markdown image گذاشت (مثلا ![](url))، ربات خودکار عکس رو می‌فرسته
+    AUTO_SEND_IMAGES_IN_REPLY: bool = os.environ.get("AUTO_SEND_IMAGES_IN_REPLY", "true").lower() == "true"
 
     @classmethod
     def validate(cls) -> None:

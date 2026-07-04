@@ -1,6 +1,7 @@
 import base64
 import json
 import mimetypes
+import re
 import threading
 import time
 import traceback
@@ -164,15 +165,22 @@ class StreamEditor:
         self._message_id: int | None = None
         self._buffer = ""
         self._last_edit = 0.0
+        self._first_edit_done = False
 
     def add_delta(self, piece: str) -> None:
         with self._lock:
             self._buffer += piece
             now = time.time()
-            if now - self._last_edit < self._min_interval:
-                return
+            # اولین ادیت زودتر انجام بشه تا کاربر سریع‌تر چیزی ببینه
+            if not self._first_edit_done:
+                if now - self._last_edit < Config.STREAM_FIRST_EDIT_DELAY:
+                    return
+            else:
+                if now - self._last_edit < self._min_interval:
+                    return
             text = self._buffer
             self._last_edit = now
+            self._first_edit_done = True
         self._flush(text)
 
     def finalize(self, final_text: str) -> None:
@@ -304,7 +312,54 @@ def handle_command(
         )
         return True
 
+    if lowered == "/help":
+        help_text = (
+            "🤖 *راهنمای ربات*\n\n"
+            "*دستورات:*\n"
+            "• `/stats` - نمایش آمار کامل ربات و کلیدها\n"
+            "• `/models` - لیست مدل‌های قابل انتخاب\n"
+            "• `/model <name>` - تعویض مدل\n"
+            "• `/reset` - پاک کردن تاریخچه\n"
+            "• `/export` - خروجی JSON تاریخچه\n"
+            "• `/help` - این راهنما\n\n"
+            "*قابلیت‌ها:*\n"
+            "• 📝 ارسال متن برای چت با ایجنت\n"
+            "• 📷 ارسال عکس برای تحلیل تصویر\n"
+            "• 📎 ارسال فایل (متنی یا باینری)\n"
+            "• 🔍 جستجوی وب (به‌صورت خودکار وقتی لازم باشه)\n"
+            "• 💻 اجرای کد پایتون و شل\n"
+            "• 📤 ارسال فایل/عکس از طرف ربات به کاربر\n"
+            "• ⚡ پاسخ استریمی زنده\n\n"
+            "*تاپیک‌ها:*\n"
+            "• 🧠 فکرها - مراحل فکر ایجنت\n"
+            "• 💬 پاسخ نهایی - جواب نهایی\n"
+            "• 🔑 آمار و کلیدها - وضعیت کلیدهای NVIDIA\n\n"
+            "برای سوال زمان‌مندی (قیمت، اخبار، آب‌وهوا) فقط بپرس، خودم جستجو می‌کنم!"
+        )
+        tg.send_message(chat_id, help_text, message_thread_id=answer_topic_id)
+        return True
+
     return False
+
+
+def _maybe_send_images_from_reply(tg: TelegramAPI, chat_id: int, message_thread_id: int, text: str) -> None:
+    """اگه مدل تو خروجیش Markdown image گذاشته (![](url))، ربات خودکار عکس رو بفرسته."""
+    if not Config.AUTO_SEND_IMAGES_IN_REPLY:
+        return
+    # الگوی ![alt](url) برای عکس‌های با پسوند jpg/jpeg/png/webp/gif
+    pattern = re.compile(
+        r"!\[([^\]]*)\]\((https?://[^\s)]+\.(?:jpg|jpeg|png|gif|webp)(?:\?[^\s)]*)?)\)",
+        re.IGNORECASE,
+    )
+    matches = pattern.findall(text)
+    for alt, url in matches[:5]:  # حداکثر ۵ عکس
+        try:
+            if url.lower().endswith(".gif") or ".gif?" in url.lower():
+                tg.send_animation_by_url(chat_id, url, caption=alt or None, message_thread_id=message_thread_id)
+            else:
+                tg.send_photo_by_url(chat_id, url, caption=alt or None, message_thread_id=message_thread_id)
+        except Exception as e:
+            print(f"⚠️ ارسال عکس خودکار ناموفق: {e}")
 
 
 def run_agent_and_reply(
@@ -357,6 +412,9 @@ def run_agent_and_reply(
             )
         send_long(tg, chat_id, result.final_answer, answer_topic_id)
 
+    # ارسال خودکار عکس‌هایی که مدل تو پاسخش گذاشته (Markdown image syntax)
+    _maybe_send_images_from_reply(tg, chat_id, answer_topic_id, result.final_answer)
+
     if result.thoughts:
         send_long(tg, chat_id, "\n\n---\n\n".join(result.thoughts), thoughts_topic_id)
     else:
@@ -397,7 +455,7 @@ def handle_message(tg: TelegramAPI, db: Storage, key_manager: NvidiaKeyManager, 
                 chat_id,
                 "سلام! پیامت رو بفرست تا شروع کنیم. من سه تاپیک برات می‌سازم: یکی برای "
                 "فکرهام، یکی برای پاسخ نهایی و یکی برای وضعیت کلیدها/توکن‌ها. "
-                "دستورات: /stats /models /model /reset /export",
+                "دستورات: /stats /models /model /reset /export /help",
             )
             ensure_topics(tg, db, chat_id, user_id)
             return

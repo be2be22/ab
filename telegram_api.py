@@ -6,7 +6,12 @@ class TelegramAPI:
         self.token = token
         self.base_url = f"https://api.telegram.org/bot{token}"
         self.file_base_url = f"https://api.telegram.org/file/bot{token}"
-        self._client = httpx.Client(timeout=65.0)
+        # HTTP/2 + connection pool بزرگ‌تر برای کاهش latency
+        self._client = httpx.Client(
+            timeout=httpx.Timeout(65.0, connect=8.0),
+            http2=True,
+            limits=httpx.Limits(max_keepalive_connections=30, max_connections=60),
+        )
 
     def _call(self, method: str, **params) -> dict:
         params = {k: v for k, v in params.items() if v is not None}
@@ -146,6 +151,38 @@ class TelegramAPI:
         if not data.get("ok"):
             raise RuntimeError(f"Telegram API error در sendPhoto: {data}")
         return data["result"]
+
+    def send_photo_by_url(
+        self,
+        chat_id: int,
+        photo_url: str,
+        caption: str | None = None,
+        message_thread_id: int | None = None,
+    ) -> dict:
+        """ارسال عکس با URL — مثلا برای عکس‌هایی که مدل از نت پیدا کرده و تو پاسخ گذاشته."""
+        return self._call(
+            "sendPhoto",
+            chat_id=chat_id,
+            photo=photo_url,
+            caption=caption,
+            message_thread_id=message_thread_id,
+        )
+
+    def send_animation_by_url(
+        self,
+        chat_id: int,
+        animation_url: str,
+        caption: str | None = None,
+        message_thread_id: int | None = None,
+    ) -> dict:
+        """ارسال گیف/ویدیو کوتاه با URL."""
+        return self._call(
+            "sendAnimation",
+            chat_id=chat_id,
+            animation=animation_url,
+            caption=caption,
+            message_thread_id=message_thread_id,
+        )
 
 
 def split_long_text(text: str, limit: int = 3800) -> list[str]:
