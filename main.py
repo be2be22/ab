@@ -11,6 +11,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from config import Config
 from key_manager import NvidiaKeyManager
 from nvidia_client import NvidiaAgentClient
+from cf_client import CloudflareAIClient
 from telegram_api import TelegramAPI, split_long_text
 from storage import Storage
 from agent import run_agent
