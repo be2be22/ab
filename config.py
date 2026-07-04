@@ -44,7 +44,10 @@ class Config:
     PYTHON_TIMEOUT_SECONDS: int = int(os.environ.get("PYTHON_TIMEOUT_SECONDS", "30"))
     # اگه true باشه، حتی دستورات خطرناک هم بدون تایید اجرا می‌شن (پیشنهاد نمی‌شه)
     ALLOW_DANGEROUS_COMMANDS: bool = os.environ.get("ALLOW_DANGEROUS_COMMANDS", "false").lower() == "true"
-    MAX_AGENT_ITERATIONS: int = int(os.environ.get("MAX_AGENT_ITERATIONS", "6"))
+    # قبلا ۶ بود که برای کارهای چندمرحله‌ای (چند tool call پشت سر هم) خیلی کم بود
+    # و ایجنت وسط کار با خطای «سقف مراحل» متوقف می‌شد. الان بزرگ‌تره؛ اگه بازم کم بود
+    # از طریق متغیر محیطی MAX_AGENT_ITERATIONS بالاتر ببرش (مثلا 60 یا 80).
+    MAX_AGENT_ITERATIONS: int = int(os.environ.get("MAX_AGENT_ITERATIONS", "40"))
     MAX_HISTORY_MESSAGES: int = int(os.environ.get("MAX_HISTORY_MESSAGES", "20"))
 
     # --- فایل / تصویر ---
@@ -53,7 +56,7 @@ class Config:
 
     # --- استریم ---
     STREAM_ENABLED: bool = os.environ.get("STREAM_ENABLED", "true").lower() == "true"
-    STREAM_EDIT_MIN_INTERVAL: float = float(os.environ.get("STREAM_EDIT_MIN_INTERVAL", "1.2"))
+    STREAM_EDIT_MIN_INTERVAL: float = float(os.environ.get("STREAM_EDIT_MIN_INTERVAL", "0.8"))
 
     # --- Concurrency ---
     MAX_CONCURRENT_UPDATES: int = int(os.environ.get("MAX_CONCURRENT_UPDATES", "8"))

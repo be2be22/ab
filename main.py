@@ -103,9 +103,15 @@ class TypingLoop:
 
 class StreamEditor:
     """
-    پاسخ نهایی رو به‌جای یک پیام کامل، به‌صورت زنده (استریم) توی تلگرام ادیت می‌کنه.
-    اولین تکه‌ی متن، یه پیام جدید می‌فرسته و تکه‌های بعدی همون پیام رو edit می‌کنن.
-    برای رعایت محدودیت نرخِ editMessageText تلگرام، بین ادیت‌ها حداقل فاصله رعایت می‌شه.
+    پاسخ نهایی رو به‌جای یک پیام کامل، به‌صورت زنده (استریم، توکن‌به‌توکن) توی تلگرام
+    ادیت می‌کنه. اولین تکه‌ی متن، یه پیام جدید می‌فرسته و تکه‌های بعدی همون پیام رو
+    edit می‌کنن. برای رعایت محدودیت نرخِ editMessageText تلگرام، بین ادیت‌ها حداقل
+    فاصله رعایت می‌شه.
+
+    نکته‌ی مهم: بافر بین مرحله‌های ایجنت (قبل/بعد از هر tool call) دیگه پاک نمی‌شه.
+    قبلاً هر مرحله‌ی جدید بافر رو خالی می‌کرد و همین باعث می‌شد کاربر ببینه یه متن
+    نوشته می‌شه، بعد پاک می‌شه و یه متن کاملاً متفاوت جاش میاد. حالا متن به‌صورت
+    پیوسته رشد می‌کنه و فقط در پایان (finalize) یک‌بار با پاسخ نهاییِ تمیز جایگزین می‌شه.
     """
 
     def __init__(self, tg: TelegramAPI, chat_id: int, message_thread_id: int, min_interval: float):
@@ -117,10 +123,6 @@ class StreamEditor:
         self._message_id: int | None = None
         self._buffer = ""
         self._last_edit = 0.0
-
-    def reset_buffer(self) -> None:
-        with self._lock:
-            self._buffer = ""
 
     def add_delta(self, piece: str) -> None:
         with self._lock:
@@ -285,7 +287,6 @@ def run_agent_and_reply(
                 user_content,
                 model=model_id,
                 on_content_delta=streamer.add_delta,
-                on_step_start=streamer.reset_buffer,
             )
         streamer.finalize(result.final_answer)
     else:
