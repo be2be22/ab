@@ -19,17 +19,11 @@ class AgentResult:
         self.final_answer = final_answer
 
 
-def _message_to_dict(message) -> dict:
-    d = {"role": "assistant", "content": message.content or ""}
-    if getattr(message, "tool_calls", None):
-        d["tool_calls"] = [
-            {
-                "id": tc.id,
-                "type": "function",
-                "function": {"name": tc.function.name, "arguments": tc.function.arguments},
-            }
-            for tc in message.tool_calls
-        ]
+def _assistant_message_for_history(message: dict) -> dict:
+    """پیامی که باید به تاریخچه‌ی ارسالی به مدل اضافه بشه (برای دور بعدی حلقه)."""
+    d = {"role": "assistant", "content": message.get("content") or ""}
+    if message.get("tool_calls"):
+        d["tool_calls"] = message["tool_calls"]
     return d
 
 
@@ -41,23 +35,24 @@ def run_agent(client: NvidiaAgentClient, history: list[dict], user_text: str) ->
     thoughts: list[str] = []
     tools = TOOLS if Config.SHELL_ENABLED else None
 
-    for iteration in range(Config.MAX_AGENT_ITERATIONS):
+    for _ in range(Config.MAX_AGENT_ITERATIONS):
         try:
             message = client.chat(messages, tools=tools)
         except AllKeysExhaustedError as e:
             return AgentResult(thoughts=thoughts, final_answer=f"⚠️ {e}")
 
-        reasoning = getattr(message, "reasoning_content", None)
+        reasoning = message.get("reasoning_content")
         if reasoning:
-            thoughts.append(reasoning.strip())
+            thoughts.append(f"💭 {reasoning}")
 
-        tool_calls = getattr(message, "tool_calls", None)
+        tool_calls = message.get("tool_calls")
         if tool_calls:
-            messages.append(_message_to_dict(message))
+            messages.append(_assistant_message_for_history(message))
             for tc in tool_calls:
-                fn_name = tc.function.name
+                fn_name = tc["function"]["name"]
+                raw_args = tc["function"].get("arguments") or "{}"
                 try:
-                    args = json.loads(tc.function.arguments or "{}")
+                    args = json.loads(raw_args)
                 except json.JSONDecodeError:
                     args = {}
 
@@ -71,15 +66,18 @@ def run_agent(client: NvidiaAgentClient, history: list[dict], user_text: str) ->
                 messages.append(
                     {
                         "role": "tool",
-                        "tool_call_id": tc.id,
+                        "tool_call_id": tc["id"],
                         "content": str(result),
                     }
                 )
-            continue  # برو دور بعدی حلقه تا مدل با نتیجه ابزار جواب بده
+            continue
 
-        # اگه tool call نداشت، یعنی این پاسخ نهاییه
-        final_answer = (message.content or "").strip()
-        return AgentResult(thoughts=thoughts, final_answer=final_answer or "(پاسخ خالی برگشت)")
+        final_answer = (message.get("content") or "").strip()
+        if not final_answer and not thoughts:
+            final_answer = "(پاسخ خالی برگشت)"
+        elif not final_answer:
+            final_answer = "(مدل فقط فکر کرد ولی پاسخ نهایی متنی برنگردوند)"
+        return AgentResult(thoughts=thoughts, final_answer=final_answer)
 
     return AgentResult(
         thoughts=thoughts,

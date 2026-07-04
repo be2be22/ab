@@ -1,7 +1,9 @@
-import time
-from openai import OpenAI, RateLimitError, AuthenticationError, APIStatusError
+import re
+import httpx
 
 from key_manager import NvidiaKeyManager
+
+THINK_TAG_RE = re.compile(r"<think>(.*?)</think>", re.DOTALL | re.IGNORECASE)
 
 
 class AllKeysExhaustedError(Exception):
@@ -9,19 +11,19 @@ class AllKeysExhaustedError(Exception):
 
 
 class NvidiaAgentClient:
+    """
+    کلاینت مستقیم روی HTTP (نه از طریق SDK رسمی openai) تا فیلدهای اضافه‌ای مثل
+    reasoning_content که مدل‌های reasoning روی NIM برمی‌گردونن، از دست نره.
+    """
+
     def __init__(self, key_manager: NvidiaKeyManager, base_url: str, model: str):
         self.key_manager = key_manager
-        self.base_url = base_url
+        self.base_url = base_url.rstrip("/")
         self.model = model
+        self._client = httpx.Client(timeout=120.0)
 
-    def _build_client(self, api_key: str) -> OpenAI:
-        return OpenAI(base_url=self.base_url, api_key=api_key)
-
-    def chat(self, messages: list[dict], tools: list[dict] | None = None, max_key_attempts: int | None = None):
-        """
-        یک درخواست chat completion می‌فرسته. اگه به rate-limit خورد، خودکار با کلید بعدی retry می‌کنه.
-        در نهایت آبجکت پاسخ (response.choices[0].message) رو برمی‌گردونه.
-        """
+    def chat(self, messages: list[dict], tools: list[dict] | None = None, max_key_attempts: int | None = None) -> dict:
+        """یک چرخه‌ی chat completion می‌زنه و دیکشنری message خام (شامل content, reasoning_content, tool_calls) رو برمی‌گردونه."""
         attempts = max_key_attempts or self.key_manager.total_keys()
         last_error: Exception | None = None
 
@@ -33,48 +35,66 @@ class NvidiaAgentClient:
                     f"همه‌ی کلیدها موقتاً محدود شدن. حدود {wait:.0f} ثانیه دیگه دوباره امتحان کن."
                 )
 
-            client = self._build_client(api_key)
+            payload = {"model": self.model, "messages": messages}
+            if tools:
+                payload["tools"] = tools
+                payload["tool_choice"] = "auto"
+
             try:
-                kwargs = {"model": self.model, "messages": messages}
-                if tools:
-                    kwargs["tools"] = tools
-                    kwargs["tool_choice"] = "auto"
-                response = client.chat.completions.create(**kwargs)
-                return response.choices[0].message
+                resp = self._client.post(
+                    f"{self.base_url}/chat/completions",
+                    headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+                    json=payload,
+                )
+            except httpx.RequestError as e:
+                last_error = e
+                continue
 
-            except RateLimitError as e:
-                retry_after = _extract_retry_after(e)
+            if resp.status_code == 429:
+                retry_after = _parse_retry_after(resp.headers.get("retry-after"))
                 self.key_manager.mark_rate_limited(api_key, retry_after)
-                last_error = e
+                last_error = RuntimeError(f"429 rate limited: {resp.text[:200]}")
                 continue
 
-            except AuthenticationError as e:
-                # کلید نامعتبره (اشتباه تایپی یا expired) — برای مدت طولانی کنارش بذار
+            if resp.status_code in (401, 403):
                 self.key_manager.mark_invalid(api_key)
-                last_error = e
+                last_error = RuntimeError(f"{resp.status_code} auth error: {resp.text[:200]}")
                 continue
 
-            except APIStatusError as e:
-                # بعضی وقت‌ها rate limit با کد دیگه‌ای برمی‌گرده (مثلاً 429 داخل یک استثنای عمومی‌تر)
-                if e.status_code == 429:
-                    retry_after = _extract_retry_after(e)
-                    self.key_manager.mark_rate_limited(api_key, retry_after)
-                    last_error = e
-                    continue
-                raise
+            if resp.status_code >= 400:
+                raise RuntimeError(f"خطای NVIDIA API ({resp.status_code}): {resp.text[:500]}")
+
+            data = resp.json()
+            message = data["choices"][0]["message"]
+            return _normalize_message(message)
 
         raise AllKeysExhaustedError(
             f"بعد از {attempts} تلاش با کلیدهای مختلف، درخواست موفق نشد. آخرین خطا: {last_error}"
         )
 
 
-def _extract_retry_after(error: Exception) -> float | None:
+def _normalize_message(message: dict) -> dict:
+    content = message.get("content") or ""
+    reasoning = message.get("reasoning_content") or message.get("reasoning") or ""
+
+    if not reasoning and "<think>" in content.lower():
+        match = THINK_TAG_RE.search(content)
+        if match:
+            reasoning = match.group(1).strip()
+            content = THINK_TAG_RE.sub("", content).strip()
+
+    return {
+        "role": message.get("role", "assistant"),
+        "content": content,
+        "reasoning_content": reasoning.strip() if reasoning else "",
+        "tool_calls": message.get("tool_calls") or [],
+    }
+
+
+def _parse_retry_after(value):
+    if not value:
+        return None
     try:
-        headers = getattr(error, "response", None)
-        if headers is not None and hasattr(headers, "headers"):
-            value = headers.headers.get("retry-after")
-            if value:
-                return float(value)
-    except Exception:
-        pass
-    return None
+        return float(value)
+    except ValueError:
+        return None
