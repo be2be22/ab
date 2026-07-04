@@ -78,7 +78,10 @@ class NvidiaAgentClient:
                 continue
 
             if resp.status_code >= 400:
-                raise RuntimeError(f"خطای NVIDIA API ({resp.status_code}): {resp.text[:500]}")
+                # برای خطاهای دیگه (400, 500, ...) کلید رو نمی‌سوزونیم،
+                # فقط آخرین خطا رو نگه می‌داریم و با کلید بعدی امتحان می‌کنیم.
+                last_error = RuntimeError(f"خطای NVIDIA API ({resp.status_code}): {resp.text[:500]}")
+                continue
 
             data = resp.json()
             message = data["choices"][0]["message"]
@@ -150,7 +153,9 @@ class NvidiaAgentClient:
                         continue
                     if resp.status_code >= 400:
                         body = resp.read()
-                        raise RuntimeError(f"خطای NVIDIA API ({resp.status_code}): {body[:500]}")
+                        # برای خطاهای دیگه (400, 500, ...) کلید رو نمی‌سوزونیم
+                        last_error = RuntimeError(f"خطای NVIDIA API ({resp.status_code}): {body[:500]}")
+                        continue
 
                     for line in resp.iter_lines():
                         if not line:
@@ -201,7 +206,10 @@ class NvidiaAgentClient:
                             if fn_delta.get("arguments"):
                                 entry["function"]["arguments"] += fn_delta["arguments"]
 
-            except httpx.RequestError as e:
+            except (httpx.RequestError, httpx.StreamError) as e:
+                # StreamError (مثل StreamClosed) subclasses RuntimeError هستن،
+                # نه RequestError، برای همین خودشون هم باید صریح catch بشن.
+                # این مهمه چون بعد از [DONE] ممکنه یه StreamClosed بیاد.
                 last_error = e
                 continue
 

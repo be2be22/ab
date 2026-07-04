@@ -200,8 +200,16 @@ class StreamEditor:
                     self._message_id = result["message_id"]
                 else:
                     self._tg.edit_message_text(self._chat_id, self._message_id, display)
-            except Exception:
-                pass
+            except Exception as e:
+                # اگه edit خطا بده (مثلاً پیام خیلی طولانی یا مارک‌داون نامعتبر)،
+                # یه پیام جدید بفرست تا پیام نهایی از دست نره
+                if self._message_id is not None and force:
+                    try:
+                        self._tg.send_message(
+                            self._chat_id, display, message_thread_id=self._thread_id
+                        )
+                    except Exception:
+                        pass
             break  # فعلا فقط اولین تکه رو زنده ادیت می‌کنیم؛ اگه خیلی بلند شد در finalize کامل می‌فرستیم
 
         if force and len(text) > 3800:
@@ -379,8 +387,8 @@ def run_agent_and_reply(
     history = db.get_history(user_id, Config.MAX_HISTORY_MESSAGES)
 
     def on_usage(info: dict) -> None:
-        # هروقت کلید عوض بشه، بلافاصله توی تاپیک آمار خبر می‌دیم.
-        if info.get("switched"):
+        # هروقت کلید واقعاً عوض بشه (نه اولین درخواست)، توی تاپیک آمار خبر می‌دیم.
+        if info.get("switched") and info.get("previous_masked_key"):
             try:
                 tg.send_message(
                     chat_id,
@@ -394,23 +402,47 @@ def run_agent_and_reply(
 
     if Config.STREAM_ENABLED:
         streamer = StreamEditor(tg, chat_id, answer_topic_id, Config.STREAM_EDIT_MIN_INTERVAL)
-        with TypingLoop(tg, chat_id, answer_topic_id):
-            result = run_agent(
-                client,
-                history,
-                user_content,
-                model=model_id,
-                on_content_delta=streamer.add_delta,
-                on_usage=on_usage,
-                tool_context=tool_context,
-            )
-        streamer.finalize(result.final_answer)
+        try:
+            with TypingLoop(tg, chat_id, answer_topic_id):
+                result = run_agent(
+                    client,
+                    history,
+                    user_content,
+                    model=model_id,
+                    on_content_delta=streamer.add_delta,
+                    on_usage=on_usage,
+                    tool_context=tool_context,
+                )
+            streamer.finalize(result.final_answer)
+        except Exception as e:
+            # اگه هر خطای غیرمنتظره‌ای پیش اومد، استریم رو finalize کن و یه پیام خطا بفرست
+            err_text = f"⚠️ خطای غیرمنتظره: {e}"
+            print(f"⚠️ run_agent_and_reply error: {type(e).__name__}: {e}")
+            traceback.print_exc()
+            try:
+                streamer.finalize(err_text)
+            except Exception:
+                try:
+                    tg.send_message(chat_id, err_text, message_thread_id=answer_topic_id)
+                except Exception:
+                    pass
+            # یه نتیجه‌ی خالی بساز تا بقیه‌ی کد کرش نکنه
+            from agent import AgentResult
+            result = AgentResult(thoughts=[], final_answer=err_text)
     else:
-        with TypingLoop(tg, chat_id, answer_topic_id):
-            result = run_agent(
-                client, history, user_content, model=model_id, on_usage=on_usage, tool_context=tool_context
-            )
-        send_long(tg, chat_id, result.final_answer, answer_topic_id)
+        try:
+            with TypingLoop(tg, chat_id, answer_topic_id):
+                result = run_agent(
+                    client, history, user_content, model=model_id, on_usage=on_usage, tool_context=tool_context
+                )
+            send_long(tg, chat_id, result.final_answer, answer_topic_id)
+        except Exception as e:
+            err_text = f"⚠️ خطای غیرمنتظره: {e}"
+            print(f"⚠️ run_agent_and_reply error: {type(e).__name__}: {e}")
+            traceback.print_exc()
+            tg.send_message(chat_id, err_text, message_thread_id=answer_topic_id)
+            from agent import AgentResult
+            result = AgentResult(thoughts=[], final_answer=err_text)
 
     # ارسال خودکار عکس‌هایی که مدل تو پاسخش گذاشته (Markdown image syntax)
     _maybe_send_images_from_reply(tg, chat_id, answer_topic_id, result.final_answer)

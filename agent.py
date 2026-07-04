@@ -77,6 +77,10 @@ def run_agent(
         if on_step_start:
             on_step_start()
         try:
+            # فقط تو مرحله‌ی آخر (که tool_call نداریم) استریم رو به StreamEditor بفرست.
+            # تو مراحل وسط، اگه مدل content تولید کنه، اون content به‌هرحال تو message.content
+            # برمی‌گرده و اگه tool_call هم باشه، تو thoughts ذخیره می‌شه. اینطوری کاربر
+            # نمی‌بینه یه متن نصفه میاد بعد پاک می‌شه.
             if on_content_delta or on_reasoning_delta:
                 message = client.chat_stream(
                     messages,
@@ -90,6 +94,12 @@ def run_agent(
                 message = client.chat(messages, tools=tools, model=model, on_usage=on_usage)
         except AllKeysExhaustedError as e:
             return AgentResult(thoughts=thoughts, final_answer=f"⚠️ {e}")
+        except Exception as e:
+            # هر خطای دیگه (مثل خطای شبکه، خطای پارس JSON، ...) رو به‌عنوان پاسخ نهایی برگردون
+            # تا کاربر بدونانه چی شده و مکالمه از دست نره
+            err_msg = f"⚠️ خطا در ارتباط با مدل: {e}"
+            print(f"⚠️ Agent error at step {step}: {type(e).__name__}: {e}")
+            return AgentResult(thoughts=thoughts, final_answer=err_msg)
 
         reasoning = message.get("reasoning_content")
         if reasoning:
@@ -97,6 +107,12 @@ def run_agent(
 
         tool_calls = message.get("tool_calls")
         if tool_calls:
+            # اگه مدل همزمان content و tool_calls داره، content رو هم تو thoughts ذخیره کن
+            # (وگرنه از دست می‌ره)
+            inline_content = (message.get("content") or "").strip()
+            if inline_content:
+                thoughts.append(f"💬 {inline_content}")
+
             messages.append(_assistant_message_for_history(message))
             for tc in tool_calls:
                 fn_name = tc["function"]["name"]
@@ -109,14 +125,19 @@ def run_agent(
                 thoughts.append(f"🔧 اجرای ابزار `{fn_name}` با آرگومان‌ها: {args}")
 
                 impl = TOOL_IMPLEMENTATIONS.get(fn_name)
-                result = impl(args, tool_context) if impl else f"[خطا] ابزار ناشناخته: {fn_name}"
+                try:
+                    result = impl(args, tool_context) if impl else f"[خطا] ابزار ناشناخته: {fn_name}"
+                except Exception as e:
+                    result = f"[خطا] اجرای ابزار `{fn_name}` شکست خورد: {e}"
 
                 thoughts.append(f"📤 خروجی `{fn_name}`:\n{result}")
 
+                # اگه tool_call_id نبود (که تو بعضی مدل‌ها پیش میاد)، یه id ساختگی بساز
+                tc_id = tc.get("id") or f"call_{fn_name}_{len(messages)}"
                 messages.append(
                     {
                         "role": "tool",
-                        "tool_call_id": tc["id"],
+                        "tool_call_id": tc_id,
                         "content": str(result),
                     }
                 )
