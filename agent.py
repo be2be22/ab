@@ -11,6 +11,9 @@ SYSTEM_PROMPT = (
     "الان هستی قابلیت جستجوی وب داخلی (built-in) داره از همون استفاده کن؛ وگرنه صادقانه بگو "
     "که به اطلاعات لحظه‌ای/به‌روز وب دسترسی نداری. قبل از اجرای دستورات مخرب یا غیرقابل‌برگشت "
     "(حذف فایل‌های مهم و غیره) با احتیاط کامل عمل کن. "
+    "اگه لازم شد یک فایل، عکس، نمودار، یا خروجیِ ساخته‌شده رو مستقیماً برای کاربر در تلگرام "
+    "بفرستی (نه فقط توی متن پاسخ توضیحش بدی)، اول با run_shell_command یا run_python فایل رو "
+    "روی سرور بساز و بعد با ابزار send_telegram_file مسیرش رو بده تا مستقیماً آپلود و ارسال بشه. "
     "پاسخ نهایی رو همیشه به فارسی و روشن بنویس. برای کد از بلاک‌های مارک‌داون (```) استفاده کن."
 )
 
@@ -37,6 +40,8 @@ def run_agent(
     on_content_delta=None,
     on_reasoning_delta=None,
     on_step_start=None,
+    on_usage=None,
+    tool_context: dict | None = None,
 ) -> AgentResult:
     """
     user_content می‌تونه یک رشته‌ی ساده باشه یا یک لیست از content-part های OpenAI-style
@@ -45,6 +50,12 @@ def run_agent(
     اگه on_content_delta پاس داده بشه، فقط در آخرین مرحله (که دیگه tool_call نداره و
     پاسخ نهاییه) به صورت استریم صدا زده می‌شه؛ این یعنی پیام تلگرام می‌تونه هم‌زمان با
     تولید متن توسط مدل، آپدیت (edit) بشه.
+
+    on_usage: بعد از هر درخواست موفق به مدل صدا زده می‌شه با اطلاعات مصرف توکن و
+    اینکه آیا کلید عوض شده یا نه (برای گزارش زنده توی تاپیک آمار).
+
+    tool_context: دیکشنری‌ای که دست ابزارهایی مثل send_telegram_file می‌رسه تا بتونن
+    مستقیماً برای کاربر توی تلگرام پیام/فایل بفرستن.
     """
     messages = [{"role": "system", "content": SYSTEM_PROMPT}]
     messages.extend(history)
@@ -52,6 +63,7 @@ def run_agent(
 
     thoughts: list[str] = []
     tools = TOOLS if Config.SHELL_ENABLED else None
+    tool_context = tool_context or {}
 
     for step in range(Config.MAX_AGENT_ITERATIONS):
         if on_step_start:
@@ -64,9 +76,10 @@ def run_agent(
                     model=model,
                     on_content_delta=on_content_delta,
                     on_reasoning_delta=on_reasoning_delta,
+                    on_usage=on_usage,
                 )
             else:
-                message = client.chat(messages, tools=tools, model=model)
+                message = client.chat(messages, tools=tools, model=model, on_usage=on_usage)
         except AllKeysExhaustedError as e:
             return AgentResult(thoughts=thoughts, final_answer=f"⚠️ {e}")
 
@@ -88,7 +101,7 @@ def run_agent(
                 thoughts.append(f"🔧 اجرای ابزار `{fn_name}` با آرگومان‌ها: {args}")
 
                 impl = TOOL_IMPLEMENTATIONS.get(fn_name)
-                result = impl(args) if impl else f"[خطا] ابزار ناشناخته: {fn_name}"
+                result = impl(args, tool_context) if impl else f"[خطا] ابزار ناشناخته: {fn_name}"
 
                 thoughts.append(f"📤 خروجی `{fn_name}`:\n{result}")
 

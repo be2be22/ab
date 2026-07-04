@@ -16,6 +16,7 @@ from agent import run_agent
 
 THOUGHTS_TOPIC_NAME = "🧠 فکرها"
 ANSWER_TOPIC_NAME = "💬 پاسخ نهایی"
+STATS_TOPIC_NAME = "🔑 آمار و کلیدها"
 
 STATE_KEY_OFFSET = "last_update_offset"
 
@@ -42,18 +43,33 @@ def _get_user_lock(user_id: int) -> threading.Lock:
         return lock
 
 
-def ensure_topics(tg: TelegramAPI, db: Storage, chat_id: int, user_id: int) -> tuple[int, int]:
+def ensure_topics(tg: TelegramAPI, db: Storage, chat_id: int, user_id: int) -> tuple[int, int, int]:
     existing = db.get_topics(user_id)
+    if existing and existing[2]:
+        return existing[0], existing[1], existing[2]
+
     if existing:
-        return existing
+        # کاربر قدیمی که فقط دو تاپیک داره؛ فقط تاپیک آمار رو براش می‌سازیم.
+        thoughts_id, answer_id, _ = existing
+        stats_topic = tg.create_forum_topic(chat_id, STATS_TOPIC_NAME)
+        stats_id = stats_topic["message_thread_id"]
+        db.save_topics(user_id, thoughts_id, answer_id, stats_id)
+        tg.send_message(
+            chat_id,
+            "این تاپیک وضعیت کلیدهای NVIDIA و مصرف توکن‌شون رو نشون می‌ده 🔑",
+            message_thread_id=stats_id,
+        )
+        return thoughts_id, answer_id, stats_id
 
     thoughts_topic = tg.create_forum_topic(chat_id, THOUGHTS_TOPIC_NAME)
     answer_topic = tg.create_forum_topic(chat_id, ANSWER_TOPIC_NAME)
+    stats_topic = tg.create_forum_topic(chat_id, STATS_TOPIC_NAME)
 
     thoughts_id = thoughts_topic["message_thread_id"]
     answer_id = answer_topic["message_thread_id"]
+    stats_id = stats_topic["message_thread_id"]
 
-    db.save_topics(user_id, thoughts_id, answer_id)
+    db.save_topics(user_id, thoughts_id, answer_id, stats_id)
 
     tg.send_message(
         chat_id,
@@ -65,7 +81,32 @@ def ensure_topics(tg: TelegramAPI, db: Storage, chat_id: int, user_id: int) -> t
         "پاسخ‌های نهایی من اینجا میاد 💬",
         message_thread_id=answer_id,
     )
-    return thoughts_id, answer_id
+    tg.send_message(
+        chat_id,
+        "این تاپیک وضعیت کلیدهای NVIDIA و مصرف توکن‌شون رو نشون می‌ده 🔑",
+        message_thread_id=stats_id,
+    )
+    return thoughts_id, answer_id, stats_id
+
+
+def format_keys_stats_text(key_manager: NvidiaKeyManager, header: str = "🔑 *وضعیت کلیدهای NVIDIA*") -> str:
+    lines = [header]
+    active_masked = key_manager.active_key_masked()
+    lines.append(f"کلیدِ در حالِ استفاده الان: `{active_masked or 'هنوز درخواستی زده نشده'}`")
+    lines.append("")
+    for item in key_manager.usage_snapshot():
+        marker = "🟢" if item["is_active"] else ("⚪" if item["available"] else "🔴")
+        line = (
+            f"{marker} کلید {item['index']} (`{item['masked']}`) — "
+            f"{item['requests']} درخواست — "
+            f"{item['total_tokens']} توکن (ورودی {item['prompt_tokens']} / خروجی {item['completion_tokens']})"
+        )
+        if item["remaining_tokens"] is not None:
+            line += f" — باقی‌مونده: {item['remaining_tokens']}"
+        if not item["available"]:
+            line += f" — 🚫 در کول‌داون ({item['cooldown_seconds']:.0f} ثانیه دیگه)"
+        lines.append(line)
+    return "\n".join(lines)
 
 
 def send_long(tg: TelegramAPI, chat_id: int, text: str, message_thread_id: int) -> None:
@@ -185,6 +226,7 @@ def handle_command(
     user_id: int,
     thoughts_topic_id: int,
     answer_topic_id: int,
+    stats_topic_id: int,
     text: str,
 ) -> bool:
     """اگه پیام یک دستور بود، پردازشش می‌کنه و True برمی‌گردونه؛ وگرنه False."""
@@ -200,7 +242,8 @@ def handle_command(
             f"- تعداد کاربران فعال: {db.count_users()}\n"
             f"- مدل فعلی شما: `{model_key}` (`{model_id}`)\n"
             f"- کلیدهای NVIDIA فعال: {key_manager.available_keys()}/{key_manager.total_keys()}\n"
-            f"- زمان روشن بودن: {int((time.time() - START_TIME) // 60)} دقیقه"
+            f"- زمان روشن بودن: {int((time.time() - START_TIME) // 60)} دقیقه\n\n"
+            f"{format_keys_stats_text(key_manager, header='🔑 *ریز مصرف کلیدها:*')}"
         )
         tg.send_message(chat_id, msg, message_thread_id=answer_topic_id)
         return True
@@ -267,16 +310,32 @@ def handle_command(
 def run_agent_and_reply(
     tg: TelegramAPI,
     db: Storage,
+    key_manager: NvidiaKeyManager,
     client: NvidiaAgentClient,
     chat_id: int,
     user_id: int,
     thoughts_topic_id: int,
     answer_topic_id: int,
+    stats_topic_id: int,
     user_content,
     history_text_for_db: str,
 ) -> None:
     model_key, model_id = resolve_model(db, user_id)
     history = db.get_history(user_id, Config.MAX_HISTORY_MESSAGES)
+
+    def on_usage(info: dict) -> None:
+        # هروقت کلید عوض بشه، بلافاصله توی تاپیک آمار خبر می‌دیم.
+        if info.get("switched"):
+            try:
+                tg.send_message(
+                    chat_id,
+                    f"🔁 کلید به کلید بعدی تغییر یافت: `{info.get('previous_masked_key')}` → `{info.get('masked_key')}`",
+                    message_thread_id=stats_topic_id,
+                )
+            except Exception:
+                pass
+
+    tool_context = {"tg": tg, "chat_id": chat_id, "answer_topic_id": answer_topic_id}
 
     if Config.STREAM_ENABLED:
         streamer = StreamEditor(tg, chat_id, answer_topic_id, Config.STREAM_EDIT_MIN_INTERVAL)
@@ -287,17 +346,27 @@ def run_agent_and_reply(
                 user_content,
                 model=model_id,
                 on_content_delta=streamer.add_delta,
+                on_usage=on_usage,
+                tool_context=tool_context,
             )
         streamer.finalize(result.final_answer)
     else:
         with TypingLoop(tg, chat_id, answer_topic_id):
-            result = run_agent(client, history, user_content, model=model_id)
+            result = run_agent(
+                client, history, user_content, model=model_id, on_usage=on_usage, tool_context=tool_context
+            )
         send_long(tg, chat_id, result.final_answer, answer_topic_id)
 
     if result.thoughts:
         send_long(tg, chat_id, "\n\n---\n\n".join(result.thoughts), thoughts_topic_id)
     else:
         tg.send_message(chat_id, "(این بار فکر خاصی ثبت نشد)", message_thread_id=thoughts_topic_id)
+
+    # آمار کامل و به‌روزِ کلیدها رو بعد از هر پاسخ توی تاپیک آمار می‌فرستیم.
+    try:
+        tg.send_message(chat_id, format_keys_stats_text(key_manager), message_thread_id=stats_topic_id)
+    except Exception:
+        pass
 
     db.add_message(user_id, "user", history_text_for_db)
     db.add_message(user_id, "assistant", result.final_answer)
@@ -326,15 +395,18 @@ def handle_message(tg: TelegramAPI, db: Storage, key_manager: NvidiaKeyManager, 
         if text and text.strip() == "/start":
             tg.send_message(
                 chat_id,
-                "سلام! پیامت رو بفرست تا شروع کنیم. من دو تاپیک برات می‌سازم: یکی برای "
-                "فکرهام و یکی برای پاسخ نهایی. دستورات: /stats /models /model /reset /export",
+                "سلام! پیامت رو بفرست تا شروع کنیم. من سه تاپیک برات می‌سازم: یکی برای "
+                "فکرهام، یکی برای پاسخ نهایی و یکی برای وضعیت کلیدها/توکن‌ها. "
+                "دستورات: /stats /models /model /reset /export",
             )
             ensure_topics(tg, db, chat_id, user_id)
             return
 
-        thoughts_topic_id, answer_topic_id = ensure_topics(tg, db, chat_id, user_id)
+        thoughts_topic_id, answer_topic_id, stats_topic_id = ensure_topics(tg, db, chat_id, user_id)
 
-        if text and handle_command(tg, db, key_manager, chat_id, user_id, thoughts_topic_id, answer_topic_id, text):
+        if text and handle_command(
+            tg, db, key_manager, chat_id, user_id, thoughts_topic_id, answer_topic_id, stats_topic_id, text
+        ):
             return
 
         # --- تصویر ---
@@ -352,7 +424,7 @@ def handle_message(tg: TelegramAPI, db: Storage, key_manager: NvidiaKeyManager, 
                 {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}},
             ]
             run_agent_and_reply(
-                tg, db, client, chat_id, user_id, thoughts_topic_id, answer_topic_id,
+                tg, db, key_manager, client, chat_id, user_id, thoughts_topic_id, answer_topic_id, stats_topic_id,
                 user_content, f"[عکس ارسال شد] {caption}",
             )
             return
@@ -400,14 +472,14 @@ def handle_message(tg: TelegramAPI, db: Storage, key_manager: NvidiaKeyManager, 
                 db_text = f"[فایل باینری ضمیمه: {file_name}] {caption}"
 
             run_agent_and_reply(
-                tg, db, client, chat_id, user_id, thoughts_topic_id, answer_topic_id,
+                tg, db, key_manager, client, chat_id, user_id, thoughts_topic_id, answer_topic_id, stats_topic_id,
                 user_content, db_text,
             )
             return
 
         # --- متن معمولی ---
         run_agent_and_reply(
-            tg, db, client, chat_id, user_id, thoughts_topic_id, answer_topic_id,
+            tg, db, key_manager, client, chat_id, user_id, thoughts_topic_id, answer_topic_id, stats_topic_id,
             text, text,
         )
 
@@ -441,7 +513,9 @@ def main() -> None:
 
     tg = TelegramAPI(Config.TELEGRAM_BOT_TOKEN)
     db = Storage(Config.DB_PATH)
-    key_manager = NvidiaKeyManager(Config.NVIDIA_API_KEYS, Config.DEFAULT_KEY_COOLDOWN_SECONDS)
+    key_manager = NvidiaKeyManager(
+        Config.NVIDIA_API_KEYS, Config.DEFAULT_KEY_COOLDOWN_SECONDS, Config.TOKEN_BUDGET_PER_KEY
+    )
     client = NvidiaAgentClient(key_manager, Config.NVIDIA_BASE_URL, Config.NVIDIA_MODEL)
 
     start_health_server(Config.HEALTH_PORT)

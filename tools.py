@@ -21,6 +21,9 @@ DANGEROUS_PATTERNS = [
     "passwd",
 ]
 
+IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".gif"}
+MAX_TELEGRAM_UPLOAD_BYTES = 45 * 1024 * 1024  # کمی زیر سقف ۵۰ مگابایتی تلگرام برای اطمینان
+
 SHELL_TOOL_SCHEMA = {
     "type": "function",
     "function": {
@@ -61,6 +64,34 @@ PYTHON_TOOL_SCHEMA = {
                 }
             },
             "required": ["code"],
+        },
+    },
+}
+
+SEND_FILE_TOOL_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "send_telegram_file",
+        "description": (
+            "یک فایل که روی سرور ساختی یا دانلود کردی (سند، عکس، PDF، CSV، نمودار و غیره) رو "
+            "مستقیماً برای کاربر در چت تلگرام ارسال می‌کنه. اول با run_shell_command یا run_python "
+            "فایل رو روی دیسک بساز، بعد مسیر کاملش رو اینجا بده. اگه پسوند فایل عکس باشه "
+            "(jpg/jpeg/png/webp/gif) به صورت عکس نمایش داده می‌شه، وگرنه به‌عنوان سند/فایل "
+            "قابل‌دانلود ارسال می‌شه. حداکثر حجم پشتیبانی‌شده حدود ۴۵ مگابایته."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "file_path": {
+                    "type": "string",
+                    "description": "مسیر کامل فایل روی سرور، مثلا /tmp/output.png یا /tmp/report.pdf",
+                },
+                "caption": {
+                    "type": "string",
+                    "description": "توضیح کوتاه اختیاری که همراه فایل نمایش داده می‌شه.",
+                },
+            },
+            "required": ["file_path"],
         },
     },
 }
@@ -145,9 +176,57 @@ def run_python(code: str) -> str:
             pass
 
 
-TOOLS = [SHELL_TOOL_SCHEMA, PYTHON_TOOL_SCHEMA]
+def send_telegram_file(file_path: str, caption: str, context: dict) -> str:
+    """
+    context باید شامل tg (نمونه‌ی TelegramAPI)، chat_id و answer_topic_id باشه؛
+    این‌ها رو agent.run_agent از main.py دریافت و پاس می‌ده.
+    """
+    tg = context.get("tg")
+    chat_id = context.get("chat_id")
+    thread_id = context.get("answer_topic_id")
+
+    if not tg or not chat_id:
+        return "[خطا] امکان ارسال فایل در این حالت وجود نداره (context تلگرام در دسترس نیست)."
+
+    if not file_path or not os.path.isfile(file_path):
+        return f"[خطا] فایلی با مسیر «{file_path}» پیدا نشد."
+
+    size = os.path.getsize(file_path)
+    if size > MAX_TELEGRAM_UPLOAD_BYTES:
+        return (
+            f"[خطا] فایل خیلی بزرگه ({size / (1024 * 1024):.1f} مگابایت). "
+            f"سقف ارسال مستقیم حدود {MAX_TELEGRAM_UPLOAD_BYTES / (1024 * 1024):.0f} مگابایته."
+        )
+
+    filename = os.path.basename(file_path)
+    ext = os.path.splitext(filename)[1].lower()
+
+    try:
+        with open(file_path, "rb") as f:
+            content_bytes = f.read()
+
+        if ext in IMAGE_EXTENSIONS:
+            tg.send_photo(chat_id, content_bytes, caption=caption or None, message_thread_id=thread_id)
+            return f"[موفق] عکس «{filename}» برای کاربر در تلگرام ارسال شد."
+
+        tg.send_document(
+            chat_id,
+            filename=filename,
+            content_bytes=content_bytes,
+            caption=caption or None,
+            message_thread_id=thread_id,
+        )
+        return f"[موفق] فایل «{filename}» برای کاربر در تلگرام ارسال شد."
+    except Exception as e:
+        return f"[خطا] ارسال فایل شکست خورد: {e}"
+
+
+TOOLS = [SHELL_TOOL_SCHEMA, PYTHON_TOOL_SCHEMA, SEND_FILE_TOOL_SCHEMA]
 
 TOOL_IMPLEMENTATIONS = {
-    "run_shell_command": lambda args: run_shell_command(args.get("command", "")),
-    "run_python": lambda args: run_python(args.get("code", "")),
+    "run_shell_command": lambda args, context: run_shell_command(args.get("command", "")),
+    "run_python": lambda args, context: run_python(args.get("code", "")),
+    "send_telegram_file": lambda args, context: send_telegram_file(
+        args.get("file_path", ""), args.get("caption", ""), context
+    ),
 }

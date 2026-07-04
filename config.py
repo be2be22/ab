@@ -24,6 +24,15 @@ class Config:
     # مدت زمان (ثانیه) استراحت یک کلید بعد از خطای rate-limit، اگه سرور retry-after نداد
     DEFAULT_KEY_COOLDOWN_SECONDS: int = int(os.environ.get("DEFAULT_KEY_COOLDOWN_SECONDS", "60"))
 
+    # اگه مدل‌هات reasoning/thinking داخلی دارن (مثل glm-5.2)، روشن بودن این گزینه
+    # باعث می‌شه قبل از جواب دادن «فکر» کنه که کیفیت رو بالا می‌بره ولی کند ترش می‌کنه.
+    # پیش‌فرض خاموشه تا پاسخ‌ها سریع‌تر بیان؛ اگه کیفیت مهم‌تر از سرعته، بذارش true.
+    ENABLE_MODEL_THINKING: bool = os.environ.get("ENABLE_MODEL_THINKING", "false").lower() == "true"
+
+    # اگه بخوای سقف مصرف توکن هر کلید رو (مثلا طبق پلن/اعتبارت) بدونی تا تاپیک آمار
+    # بتونه «باقی‌مونده» رو هم نشون بده. صفر یعنی نامحدود/نامشخص.
+    TOKEN_BUDGET_PER_KEY: int = int(os.environ.get("TOKEN_BUDGET_PER_KEY", "0"))
+
     # --- مدل‌های قابل انتخاب با /model و /models ---
     # کلید کوتاه -> شناسه واقعی مدل روی NVIDIA NIM (build.nvidia.com)
     MODELS: dict[str, str] = {

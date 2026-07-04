@@ -2,6 +2,7 @@ import json
 import re
 import httpx
 
+from config import Config
 from key_manager import NvidiaKeyManager
 
 THINK_TAG_RE = re.compile(r"<think>(.*?)</think>", re.DOTALL | re.IGNORECASE)
@@ -29,6 +30,7 @@ class NvidiaAgentClient:
         tools: list[dict] | None = None,
         model: str | None = None,
         max_key_attempts: int | None = None,
+        on_usage=None,
     ) -> dict:
         """یک چرخه‌ی chat completion می‌زنه و دیکشنری message خام (شامل content, reasoning_content, tool_calls) رو برمی‌گردونه."""
         use_model = model or self.model
@@ -44,7 +46,7 @@ class NvidiaAgentClient:
                 )
 
             payload = {"model": use_model, "messages": messages}
-            payload["chat_template_kwargs"] = {"enable_thinking": True, "clear_thinking": False}
+            payload["chat_template_kwargs"] = {"enable_thinking": Config.ENABLE_MODEL_THINKING, "clear_thinking": False}
             if tools:
                 payload["tools"] = tools
                 payload["tool_choice"] = "auto"
@@ -75,6 +77,7 @@ class NvidiaAgentClient:
 
             data = resp.json()
             message = data["choices"][0]["message"]
+            self._report_usage(api_key, data.get("usage") or {}, on_usage)
             return _normalize_message(message)
 
         raise AllKeysExhaustedError(
@@ -89,6 +92,7 @@ class NvidiaAgentClient:
         max_key_attempts: int | None = None,
         on_content_delta=None,
         on_reasoning_delta=None,
+        on_usage=None,
     ) -> dict:
         """
         نسخه‌ی استریم‌شده: با stream=True به NIM وصل می‌شه و chunk‌های SSE رو می‌خونه.
@@ -109,7 +113,8 @@ class NvidiaAgentClient:
                 )
 
             payload = {"model": use_model, "messages": messages, "stream": True}
-            payload["chat_template_kwargs"] = {"enable_thinking": True, "clear_thinking": False}
+            payload["stream_options"] = {"include_usage": True}
+            payload["chat_template_kwargs"] = {"enable_thinking": Config.ENABLE_MODEL_THINKING, "clear_thinking": False}
             if tools:
                 payload["tools"] = tools
                 payload["tool_choice"] = "auto"
@@ -117,6 +122,7 @@ class NvidiaAgentClient:
             content_parts: list[str] = []
             reasoning_parts: list[str] = []
             tool_calls_acc: dict[int, dict] = {}
+            usage: dict = {}
             role = "assistant"
 
             try:
@@ -154,6 +160,10 @@ class NvidiaAgentClient:
                         except json.JSONDecodeError:
                             continue
 
+                        chunk_usage = chunk.get("usage")
+                        if chunk_usage:
+                            usage = chunk_usage
+
                         choices = chunk.get("choices") or []
                         if not choices:
                             continue
@@ -190,6 +200,8 @@ class NvidiaAgentClient:
                 last_error = e
                 continue
 
+            self._report_usage(api_key, usage, on_usage)
+
             tool_calls = [tool_calls_acc[i] for i in sorted(tool_calls_acc)] if tool_calls_acc else []
             message = {
                 "role": role,
@@ -202,6 +214,25 @@ class NvidiaAgentClient:
         raise AllKeysExhaustedError(
             f"بعد از {attempts} تلاش با کلیدهای مختلف، درخواست موفق نشد. آخرین خطا: {last_error}"
         )
+
+    def _report_usage(self, api_key: str, usage: dict, on_usage) -> None:
+        prompt_tokens = int(usage.get("prompt_tokens") or 0)
+        completion_tokens = int(usage.get("completion_tokens") or 0)
+        previous_masked = self.key_manager.active_key_masked()
+        switched = self.key_manager.record_usage(api_key, prompt_tokens, completion_tokens)
+        if on_usage:
+            try:
+                on_usage(
+                    {
+                        "masked_key": self.key_manager.active_key_masked(),
+                        "previous_masked_key": previous_masked,
+                        "switched": switched,
+                        "prompt_tokens": prompt_tokens,
+                        "completion_tokens": completion_tokens,
+                    }
+                )
+            except Exception:
+                pass
 
 
 def _normalize_message(message: dict) -> dict:

@@ -127,6 +127,26 @@ class TelegramAPI:
             raise RuntimeError(f"Telegram API error در sendDocument: {data}")
         return data["result"]
 
+    def send_photo(
+        self,
+        chat_id: int,
+        content_bytes: bytes,
+        caption: str | None = None,
+        message_thread_id: int | None = None,
+        filename: str = "photo.jpg",
+    ) -> dict:
+        params = {k: v for k, v in {
+            "chat_id": chat_id,
+            "caption": caption,
+            "message_thread_id": message_thread_id,
+        }.items() if v is not None}
+        files = {"photo": (filename, content_bytes)}
+        resp = self._client.post(f"{self.base_url}/sendPhoto", data=params, files=files)
+        data = resp.json()
+        if not data.get("ok"):
+            raise RuntimeError(f"Telegram API error در sendPhoto: {data}")
+        return data["result"]
+
 
 def split_long_text(text: str, limit: int = 3800) -> list[str]:
     if len(text) <= limit:

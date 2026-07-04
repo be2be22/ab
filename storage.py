@@ -18,10 +18,16 @@ class Storage:
                 CREATE TABLE IF NOT EXISTS user_topics (
                     user_id INTEGER PRIMARY KEY,
                     thoughts_topic_id INTEGER,
-                    answer_topic_id INTEGER
+                    answer_topic_id INTEGER,
+                    stats_topic_id INTEGER
                 )
                 """
             )
+            # مهاجرت برای دیتابیس‌های قدیمی‌تر که ستون stats_topic_id رو نداشتن
+            try:
+                self._conn.execute("ALTER TABLE user_topics ADD COLUMN stats_topic_id INTEGER")
+            except sqlite3.OperationalError:
+                pass
             self._conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS history (
@@ -44,25 +50,28 @@ class Storage:
             self._conn.commit()
 
     # --- topics ---
-    def get_topics(self, user_id: int) -> tuple[int, int] | None:
+    def get_topics(self, user_id: int) -> tuple[int, int, int | None] | None:
         with self._lock:
             row = self._conn.execute(
-                "SELECT thoughts_topic_id, answer_topic_id FROM user_topics WHERE user_id = ?",
+                "SELECT thoughts_topic_id, answer_topic_id, stats_topic_id FROM user_topics WHERE user_id = ?",
                 (user_id,),
             ).fetchone()
         return tuple(row) if row else None
 
-    def save_topics(self, user_id: int, thoughts_topic_id: int, answer_topic_id: int) -> None:
+    def save_topics(
+        self, user_id: int, thoughts_topic_id: int, answer_topic_id: int, stats_topic_id: int | None = None
+    ) -> None:
         with self._lock:
             self._conn.execute(
                 """
-                INSERT INTO user_topics (user_id, thoughts_topic_id, answer_topic_id)
-                VALUES (?, ?, ?)
+                INSERT INTO user_topics (user_id, thoughts_topic_id, answer_topic_id, stats_topic_id)
+                VALUES (?, ?, ?, ?)
                 ON CONFLICT(user_id) DO UPDATE SET
                     thoughts_topic_id = excluded.thoughts_topic_id,
-                    answer_topic_id = excluded.answer_topic_id
+                    answer_topic_id = excluded.answer_topic_id,
+                    stats_topic_id = COALESCE(excluded.stats_topic_id, user_topics.stats_topic_id)
                 """,
-                (user_id, thoughts_topic_id, answer_topic_id),
+                (user_id, thoughts_topic_id, answer_topic_id, stats_topic_id),
             )
             self._conn.commit()
 
