@@ -50,6 +50,16 @@ class Config:
     # مدل پیش‌فرض: glm-5.2 (reasoning — دقیق‌تر و باکیفیت‌تر از مدل‌های non-reasoning)
     DEFAULT_MODEL_KEY: str = os.environ.get("DEFAULT_MODEL_KEY", "glm-5.2")
 
+    # --- Reasoning effort (فقط برای مدل‌های reasoning مثل glm-5.2 معنا داره) ---
+    # هرچی effort کمتر باشه، مدل کمتر "فکر" می‌کنه قبل از جواب دادن => سریع‌تر جواب می‌ده،
+    # ولی برای مسائل خیلی پیچیده ممکنه دقتش کمی کمتر بشه.
+    # مقادیر مجاز (طبق مستندات Cloudflare/OpenAI-style): "low" | "medium" | "high"
+    # پیش‌فرض روی "low" گذاشته شده تا حتی با glm-5.2، جواب‌ها سریع بیان (حتی برای «سلام»).
+    CF_REASONING_EFFORT: str = os.environ.get("CF_REASONING_EFFORT", "low")
+    # اگه پیام کاربر به ابزار نیاز داشته باشه (تحلیل، کد، تحقیق)، effort بالاتری استفاده
+    # می‌شه چون انتخاب درست ابزار و برنامه‌ریزی چندمرحله‌ای به فکر بیشتری نیاز داره.
+    CF_REASONING_EFFORT_WITH_TOOLS: str = os.environ.get("CF_REASONING_EFFORT_WITH_TOOLS", "medium")
+
     # --- Agent / Shell ---
     SHELL_ENABLED: bool = os.environ.get("SHELL_ENABLED", "true").lower() == "true"
     SHELL_TIMEOUT_SECONDS: int = int(os.environ.get("SHELL_TIMEOUT_SECONDS", "30"))

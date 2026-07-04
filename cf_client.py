@@ -49,6 +49,7 @@ class CloudflareAIClient:
         model: str | None = None,
         on_usage=None,
         max_tokens: int | None = None,
+        reasoning_effort: str | None = None,
     ) -> dict:
         """یک چرخه‌ی chat completion می‌زنه و دیکشنری message نرمال‌شده رو برمی‌گردونه."""
         use_model = model or self.model
@@ -68,6 +69,8 @@ class CloudflareAIClient:
                 "messages": messages,
                 "max_tokens": max_tokens or 4096,
             }
+            if reasoning_effort:
+                payload["reasoning_effort"] = reasoning_effort
             if tools:
                 payload["tools"] = tools
                 payload["tool_choice"] = "auto"
@@ -151,6 +154,7 @@ class CloudflareAIClient:
         on_reasoning_delta=None,
         on_usage=None,
         max_tokens: int | None = None,
+        reasoning_effort: str | None = None,
     ) -> dict:
         """
         نسخه‌ی استریم‌شده: با stream=True به Cloudflare وصل می‌شه و chunk‌های SSE رو می‌خونه.
@@ -158,7 +162,8 @@ class CloudflareAIClient:
         در پایان، همون دیکشنری نرمال‌شده‌ی message رو برمی‌گردونه.
 
         نکته برای GLM-5.2: مدل اول reasoning_content رو استریم می‌کنه (فکر مدل به انگلیسی)
-        و بعد content رو (جواب نهایی به فارسی).
+        و بعد content رو (جواب نهایی به فارسی). با reasoning_effort می‌شه میزان این فکر
+        کردن رو کنترل کرد (low = سریع‌تر، کمتر فکر می‌کنه).
         """
         use_model = model or self.model
         max_retries = Config.CF_MAX_RETRIES + self.token_manager.total_tokens_count()
@@ -178,6 +183,8 @@ class CloudflareAIClient:
                 "stream": True,
                 "max_tokens": max_tokens or 4096,
             }
+            if reasoning_effort:
+                payload["reasoning_effort"] = reasoning_effort
             if tools:
                 payload["tools"] = tools
                 payload["tool_choice"] = "auto"

@@ -43,6 +43,18 @@ class AgentResult:
         self.final_answer = final_answer
 
 
+# مدل‌هایی که reasoning_effort روشون معنا داره (بقیه‌ی مدل‌ها این پارامتر رو نمی‌شناسن
+# و ممکنه با فرستادنش خطا بدن، پس فقط برای این مدل‌ها می‌فرستیمش).
+_REASONING_MODEL_MARKERS = ("glm-5", "deepseek-r1", "qwq", "gpt-oss")
+
+
+def _is_reasoning_model(model_id: str | None) -> bool:
+    if not model_id:
+        return False
+    lowered = model_id.lower()
+    return any(marker in lowered for marker in _REASONING_MODEL_MARKERS)
+
+
 def _assistant_message_for_history(message: dict) -> dict:
     """پیامی که باید به تاریخچه‌ی ارسالی به مدل اضافه بشه (برای دور بعدی حلقه)."""
     d = {"role": "assistant", "content": message.get("content") or ""}
@@ -153,6 +165,16 @@ def run_agent(
             else:
                 max_tok = 1500  # حالت وسط
 
+            # ⚡ کنترل عمق فکر کردن مدل‌های reasoning (glm-5.2, deepseek-r1) با
+            # reasoning_effort. برای پیام‌های ساده effort کم می‌ذاریم تا مدل خیلی سریع‌تر
+            # جواب بده؛ وقتی ابزار لازمه، effort متوسط می‌ذاریم تا انتخاب ابزار درست بمونه.
+            # روی مدل‌های non-reasoning (llama, qwen coder) این پارامتر اصلاً فرستاده نمی‌شه.
+            reasoning_effort = None
+            if _is_reasoning_model(model):
+                reasoning_effort = (
+                    Config.CF_REASONING_EFFORT_WITH_TOOLS if tools else Config.CF_REASONING_EFFORT
+                )
+
             if on_content_delta or on_reasoning_delta:
                 message = client.chat_stream(
                     messages,
@@ -162,6 +184,7 @@ def run_agent(
                     on_reasoning_delta=on_reasoning_delta,
                     on_usage=on_usage,
                     max_tokens=max_tok,
+                    reasoning_effort=reasoning_effort,
                 )
             else:
                 message = client.chat(
@@ -170,6 +193,7 @@ def run_agent(
                     model=model,
                     on_usage=on_usage,
                     max_tokens=max_tok,
+                    reasoning_effort=reasoning_effort,
                 )
         except CloudflareError as e:
             err_msg = f"⚠️ خطای Cloudflare: {e}"
