@@ -66,6 +66,11 @@ class NvidiaAgentClient:
 
             data = resp.json()
             message = data["choices"][0]["message"]
+            print(f"🔍 DEBUG کلیدهای پاسخ خام: {list(message.keys())}")
+            if message.get("reasoning_content"):
+                print(f"🔍 DEBUG طول reasoning_content: {len(message['reasoning_content'])}")
+            else:
+                print("🔍 DEBUG reasoning_content خالی یا وجود نداره")
             return _normalize_message(message)
 
         raise AllKeysExhaustedError(
