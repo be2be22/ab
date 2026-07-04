@@ -36,6 +36,7 @@ class NvidiaAgentClient:
                 )
 
             payload = {"model": self.model, "messages": messages}
+            payload["chat_template_kwargs"] = {"enable_thinking": True, "clear_thinking": False}
             if tools:
                 payload["tools"] = tools
                 payload["tool_choice"] = "auto"
