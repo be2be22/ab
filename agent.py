@@ -55,6 +55,43 @@ def _looks_like_tool_call_json(text: str) -> bool:
     return any(k.lower() in lowered for k in keywords)
 
 
+# کلمات کلیدی که نشون می‌دن کاربر واقعاً به یه ابزار نیاز داره
+# دقت: کلمات خیلی عمومی (مثل «بنویس»، «بزن») رو نذاریم چون تو سوالات ساده هم هستن
+_TOOL_KEYWORDS = [
+    # اجرای کد / شل — فقط کلمات فنی
+    "run_python", "run_shell", "run python", "run shell",
+    "python", "shell", "ترمینال", "terminal", "bash",
+    "کد بزن", "کد بنویس", "اجرای کد", "اجرا کن",
+    # جستجوی وب
+    "جستجو", "سرچ", "search", "گوگل", "google", "اینترنت", "وب‌سرچ", "web search",
+    "قیمت", "اخبار", "نرخ", "هواشناسی", "آب و هوا", "آب‌وهوا",
+    "امروز", "الان", "اخیر", "جدیدترین", "به‌روز", "به روز",
+    # فایل
+    "فایل بفرست", "file send", "دانلود کن", "آپلود کن",
+    "send_telegram", "عکس بفرست", "تصویر بفرست",
+    # تحلیل فنی
+    "تحلیل کن", "بررسی کن", "analyze", "inspect",
+]
+
+
+def _needs_tools(user_content) -> bool:
+    """بررسی می‌کنه که آیا پیام کاربر به ابزارها نیاز داره یا نه.
+    user_content می‌تونه string یا لیست content-part‌ها باشه (برای تصویر).
+    اگه تصویر باشه، همیشه tools رو می‌فرستیم (شاید مدل بخواد تحلیل کنه).
+    اگه متن باشه و کلمات کلیدی tool نداشته باشه، tools نمی‌فرستیم."""
+    # اگه لیست (تصویر) هست، tools بفرست
+    if isinstance(user_content, list):
+        return True
+    if not isinstance(user_content, str):
+        return True
+    text = user_content.lower()
+    # اگه پیام خیلی کوتاهه (مثل «سلام»، «چطوری»، «ممنون»)، tools لازم نیست
+    if len(text.strip()) < 15:
+        return False
+    # اگه کلمات کلیدی tool داره، tools بفرست
+    return any(k in text for k in _TOOL_KEYWORDS)
+
+
 def run_agent(
     client: NvidiaAgentClient,
     history: list[dict],
@@ -87,13 +124,22 @@ def run_agent(
     thoughts: list[str] = []
     # اگه SHELL_ENABLED=false باشه، فقط ابزارهای وب و send_telegram_file در دسترسن
     if Config.SHELL_ENABLED:
-        tools = TOOLS
+        all_tools = TOOLS
     else:
-        tools = [t for t in TOOLS if t["function"]["name"] in ("web_search", "web_fetch", "send_telegram_file")]
-    # بعضی مدل‌ها از tools پشتیبانی نمی‌کنن (مثل mixtral-8x7b) — اگه مدل جزو اینا باشه، tools رو None کن
+        all_tools = [t for t in TOOLS if t["function"]["name"] in ("web_search", "web_fetch", "send_telegram_file")]
+    # بعضی مدل‌ها از tools پشتیبانی نمی‌کنن (مثل mixtral-8x7b)
     MODELS_WITHOUT_TOOLS = {"mistralai/mixtral-8x7b-instruct-v0.1"}
     if model in MODELS_WITHOUT_TOOLS:
+        all_tools = None
+
+    # ⚡ بهینه‌سازی سرعت: اگه پیام کاربر به ابزار نیاز نداره (سوال ساده، سلام، شعر و ...),
+    # tools رو اصلاً به مدل نمی‌فرستیم. اینطوری مدل مستقیم جواب می‌ده و ۳-۵ برابر سریع‌تر می‌شه.
+    # برای مدل‌های کوچیک (مثل llama-3.1-8b) این خیلی مهمه چون اگه tools ببینن، برای هر چیزی
+    # سعی می‌کنن tool_call بزنن.
+    if all_tools and not _needs_tools(user_content):
         tools = None
+    else:
+        tools = all_tools
     tool_context = tool_context or {}
 
     for step in range(Config.MAX_AGENT_ITERATIONS):
