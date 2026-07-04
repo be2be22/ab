@@ -22,7 +22,6 @@
 ## قابلیت‌ها
 - **فایل**: هر فایلی که بفرستی دانلود و بررسی می‌شه (فایل‌های متنی مستقیم به مدل داده می‌شن، فایل‌های باینری از طریق ابزار `run_shell_command`/`run_python` قابل بررسی‌ان).
 - **تصویر**: عکس‌ها به‌صورت base64 به مدل پاس داده می‌شن (نیازمند مدلی با پشتیبانی vision روی NIM).
-- **وب‌سرچ**: ابزار `web_search` (بدون نیاز به API key، از طریق DuckDuckGo).
 - **اجرای کد**: `run_python` برای اجرای کد پایتون و `run_shell_command` برای اجرای هر زبان/دستور دیگه.
 - **استریم پاسخ**: پیام پاسخ به‌جای ارسال یک‌جا، به‌صورت تدریجی ادیت می‌شه.
 - **مانیتورینگ**: endpoint ساده‌ی `GET /health` روی پورت `PORT` (برای Railway healthcheck).
@@ -45,7 +44,6 @@ NVIDIA_API_KEYS=nvapi-xxx,nvapi-yyy
 DEFAULT_MODEL_KEY=glm-5.2
 SHELL_ENABLED=true
 ALLOW_DANGEROUS_COMMANDS=false
-WEB_SEARCH_ENABLED=true
 STREAM_ENABLED=true
 MAX_CONCURRENT_UPDATES=8
 DB_PATH=/data/bot.db
@@ -61,6 +59,13 @@ PORT=8080   # Railway خودش ست می‌کنه
 
 ## ۵. تست
 توی تلگرام به ربات پیام بده. باید فقط یک‌بار دو تاپیک بسازه و شروع کنه به جواب دادن؛ برای پیام‌های بعدی تاپیک جدیدی ساخته نمی‌شه.
+
+## نکته درباره‌ی جستجوی وب
+ابزار جستجوی سفارشی (DuckDuckGo scraping) از ربات حذف شده. اگه مدلی انتخاب کنی که خودش
+قابلیت جستجوی وب داخلی (built-in / hosted search) داره، از همون استفاده می‌کنه؛ روی
+endpoint استاندارد `/v1/chat/completions` مدل‌های فعلی NIM چنین قابلیتی به‌صورت پیش‌فرض
+تضمین‌شده نیست، پس اگه به مدل خاصی با این قابلیت نیاز داری بگو تا `Config.MODELS` رو با
+همون model id آپدیت کنیم.
 
 ## نکات امنیتی مهم
 - `ALLOW_DANGEROUS_COMMANDS` رو روی `false` نگه دار مگر اینکه واقعاً بدونی چیکار می‌کنی.

@@ -2,10 +2,6 @@ import subprocess
 import sys
 import tempfile
 import os
-import re
-import html as html_lib
-
-import httpx
 
 from config import Config
 
@@ -65,32 +61,6 @@ PYTHON_TOOL_SCHEMA = {
                 }
             },
             "required": ["code"],
-        },
-    },
-}
-
-WEB_SEARCH_TOOL_SCHEMA = {
-    "type": "function",
-    "function": {
-        "name": "web_search",
-        "description": (
-            "یک عبارت رو در وب جستجو می‌کنه و چند نتیجه‌ی برتر (عنوان، خلاصه، لینک) رو "
-            "برمی‌گردونه. برای اطلاعات به‌روز، اخبار، یا هر چیزی که ممکنه توی دانش مدل "
-            "نباشه استفاده کن."
-        ),
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "query": {
-                    "type": "string",
-                    "description": "عبارت جستجو",
-                },
-                "max_results": {
-                    "type": "integer",
-                    "description": "حداکثر تعداد نتایج (پیش‌فرض ۵)",
-                },
-            },
-            "required": ["query"],
         },
     },
 }
@@ -175,56 +145,9 @@ def run_python(code: str) -> str:
             pass
 
 
-_RESULT_BLOCK_RE = re.compile(
-    r'<a rel="nofollow" class="result__a" href="([^"]+)">(.*?)</a>.*?'
-    r'<a class="result__snippet"[^>]*>(.*?)</a>',
-    re.DOTALL,
-)
-
-
-def _strip_tags(text: str) -> str:
-    return html_lib.unescape(re.sub(r"<[^>]+>", "", text)).strip()
-
-
-def web_search(query: str, max_results: int = 5) -> str:
-    if not Config.WEB_SEARCH_ENABLED:
-        return "[خطا] ابزار وب‌سرچ روی این ربات غیرفعاله (WEB_SEARCH_ENABLED=false)."
-
-    if not query or not query.strip():
-        return "[خطا] عبارت جستجو خالیه."
-
-    max_results = max(1, min(int(max_results or 5), 10))
-
-    try:
-        resp = httpx.get(
-            "https://html.duckduckgo.com/html/",
-            params={"q": query},
-            headers={"User-Agent": "Mozilla/5.0 (compatible; TelegramAgentBot/1.0)"},
-            timeout=15.0,
-            follow_redirects=True,
-        )
-        resp.raise_for_status()
-    except Exception as e:
-        return f"[خطا] جستجو انجام نشد: {e}"
-
-    matches = _RESULT_BLOCK_RE.findall(resp.text)
-    if not matches:
-        return f"نتیجه‌ای برای «{query}» پیدا نشد."
-
-    lines = []
-    for i, (url, title, snippet) in enumerate(matches[:max_results], start=1):
-        lines.append(
-            f"{i}. {_strip_tags(title)}\n   {_strip_tags(snippet)}\n   {url}"
-        )
-    return "\n".join(lines)
-
-
 TOOLS = [SHELL_TOOL_SCHEMA, PYTHON_TOOL_SCHEMA]
-if Config.WEB_SEARCH_ENABLED:
-    TOOLS.append(WEB_SEARCH_TOOL_SCHEMA)
 
 TOOL_IMPLEMENTATIONS = {
     "run_shell_command": lambda args: run_shell_command(args.get("command", "")),
     "run_python": lambda args: run_python(args.get("code", "")),
-    "web_search": lambda args: web_search(args.get("query", ""), args.get("max_results", 5)),
 }
