@@ -104,15 +104,20 @@ def main() -> None:
             continue
 
         for update in updates:
-            offset = update["update_id"]
-            db.set_state(STATE_KEY_OFFSET, str(offset))
+            offset = update["update_id"] + 1
+            db.set_state(STATE_KEY_OFFSET, str(update["update_id"]))
 
             message = update.get("message")
             if not message:
                 continue
 
+            text_preview = (message.get("text") or "")[:80]
+            from_id = message.get("from", {}).get("id")
+            print(f"📩 پیام جدید از {from_id}: {text_preview!r}")
+
             try:
                 handle_message(tg, db, client, message)
+                print(f"✅ پیام از {from_id} پردازش شد.")
             except Exception:
                 print("⚠️ خطا در پردازش پیام:")
                 traceback.print_exc()
