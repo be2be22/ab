@@ -2,6 +2,7 @@ import json
 
 from config import Config
 from nvidia_client import NvidiaAgentClient, AllKeysExhaustedError
+from cf_client import CloudflareAIClient, CloudflareError
 from tools import TOOLS, TOOL_IMPLEMENTATIONS
 
 SYSTEM_PROMPT = (
@@ -146,26 +147,48 @@ def run_agent(
         if on_step_start:
             on_step_start()
         try:
+            # ⚡ بهینه‌سازی سرعت برای GLM-5.2: اگه سوال ساده‌ست (به tool نیاز نداره)،
+            # max_tokens رو کم می‌کنیم تا reasoning سریع‌تر تموم بشه. GLM-5.2 یه مدل
+            # reasoning هست و اگه max_tokens زیاد باشه، ممکنه ۳۰+ ثانیه فقط فکر کنه!
+            if not tools and step == 0 and not _needs_tools(user_content):
+                max_tok = 600  # سوال ساده — کافیه
+            elif tools:
+                max_tok = 2000  # برای tool_call بیشتر لازمه
+            else:
+                max_tok = 1500  # حالت وسط
+
             # فقط تو مرحله‌ی آخر (که tool_call نداریم) استریم رو به StreamEditor بفرست.
-            # تو مراحل وسط، اگه مدل content تولید کنه، اون content به‌هرحال تو message.content
-            # برمی‌گرده و اگه tool_call هم باشه، تو thoughts ذخیره می‌شه. اینطوری کاربر
-            # نمی‌بینه یه متن نصفه میاد بعد پاک می‌شه.
             if on_content_delta or on_reasoning_delta:
-                message = client.chat_stream(
-                    messages,
+                # اگه کلاینت Cloudflare هست، max_tokens رو پاس بده
+                kwargs = dict(
+                    messages=messages,
                     tools=tools,
                     model=model,
                     on_content_delta=on_content_delta,
                     on_reasoning_delta=on_reasoning_delta,
                     on_usage=on_usage,
                 )
+                # Cloudflare کلاینت max_tokens قبول می‌کنه، NVIDIA نه
+                try:
+                    message = client.chat_stream(max_tokens=max_tok, **kwargs)
+                except TypeError:
+                    # اگه کلاینت max_tokens قبول نکرد (NVIDIA)، بدون اون صدا بزن
+                    kwargs.pop("max_tokens", None)
+                    message = client.chat_stream(**kwargs)
             else:
-                message = client.chat(messages, tools=tools, model=model, on_usage=on_usage)
+                kwargs = dict(messages=messages, tools=tools, model=model, on_usage=on_usage)
+                try:
+                    message = client.chat(max_tokens=max_tok, **kwargs)
+                except TypeError:
+                    kwargs.pop("max_tokens", None)
+                    message = client.chat(**kwargs)
         except AllKeysExhaustedError as e:
             return AgentResult(thoughts=thoughts, final_answer=f"⚠️ {e}")
+        except CloudflareError as e:
+            err_msg = f"⚠️ خطای Cloudflare: {e}"
+            print(f"⚠️ Agent CloudflareError at step {step}: {e}")
+            return AgentResult(thoughts=thoughts, final_answer=err_msg)
         except Exception as e:
-            # هر خطای دیگه (مثل خطای شبکه، خطای پارس JSON، ...) رو به‌عنوان پاسخ نهایی برگردون
-            # تا کاربر بدونانه چی شده و مکالمه از دست نره
             err_msg = f"⚠️ خطا در ارتباط با مدل: {e}"
             print(f"⚠️ Agent error at step {step}: {type(e).__name__}: {e}")
             return AgentResult(thoughts=thoughts, final_answer=err_msg)

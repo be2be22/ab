@@ -218,12 +218,22 @@ class StreamEditor:
             send_long(self._tg, self._chat_id, rest, self._thread_id)
 
 
-def resolve_model(db: Storage, user_id: int) -> tuple[str, str]:
-    """(model_key, model_id) رو برمی‌گردونه؛ اول ترجیح خود کاربر، بعد مدل پیش‌فرض."""
+def resolve_model(db: Storage, user_id: int) -> tuple[str, str, str]:
+    """(model_key, provider, model_id) رو برمی‌گردونه؛ اول ترجیح خود کاربر، بعد مدل پیش‌فرض.
+    provider: "cf" یا "nvidia"
+    """
     model_key = db.get_user_model(user_id) or Config.DEFAULT_MODEL_KEY
     if model_key not in Config.MODELS:
         model_key = Config.DEFAULT_MODEL_KEY
-    return model_key, Config.MODELS.get(model_key, Config.NVIDIA_MODEL)
+    # MODELS[key] = (provider, model_id)
+    entry = Config.MODELS.get(model_key)
+    if entry is None:
+        # fallback
+        return model_key, "cf", Config.CF_AI_MODEL
+    if isinstance(entry, tuple):
+        return model_key, entry[0], entry[1]
+    # backward compat: اگه entry یه string باشه (نسخه‌های قدیمی)
+    return model_key, "nvidia", entry
 
 
 def build_file_attachment_text(file_name: str, text_content: str) -> str:
@@ -250,27 +260,41 @@ def handle_command(
     lowered = stripped.lower()
 
     if lowered == "/stats":
-        model_key, model_id = resolve_model(db, user_id)
+        model_key, provider, model_id = resolve_model(db, user_id)
+        # اگه key_manager تنظیم شده (NVIDIA fallback فعال هست)، آمار کلیدها رو نشون بده
+        if key_manager:
+            keys_line = f"- کلیدهای NVIDIA فعال: {key_manager.available_keys()}/{key_manager.total_keys()}\n"
+            keys_detail = f"\n{format_keys_stats_text(key_manager, header='🔑 *ریز مصرف کلیدها:*')}"
+        else:
+            keys_line = "- پروایدر: Cloudflare Workers AI (بدون کلید NVIDIA)\n"
+            keys_detail = ""
         msg = (
             "📊 *آمار ربات*\n"
             f"- پیام‌های شما: {db.count_messages(user_id)}\n"
             f"- کل پیام‌های ثبت‌شده: {db.count_messages()}\n"
             f"- تعداد کاربران فعال: {db.count_users()}\n"
-            f"- مدل فعلی شما: `{model_key}` (`{model_id}`)\n"
-            f"- کلیدهای NVIDIA فعال: {key_manager.available_keys()}/{key_manager.total_keys()}\n"
-            f"- زمان روشن بودن: {int((time.time() - START_TIME) // 60)} دقیقه\n\n"
-            f"{format_keys_stats_text(key_manager, header='🔑 *ریز مصرف کلیدها:*')}"
+            f"- مدل فعلی شما: `{model_key}` ({provider}) → `{model_id}`\n"
+            f"{keys_line}"
+            f"- زمان روشن بودن: {int((time.time() - START_TIME) // 60)} دقیقه{keys_detail}"
         )
         tg.send_message(chat_id, msg, message_thread_id=answer_topic_id)
         return True
 
     if lowered == "/models":
-        model_key, _ = resolve_model(db, user_id)
+        model_key, _, _ = resolve_model(db, user_id)
         lines = ["📚 *مدل‌های قابل انتخاب:*"]
-        for key, model_id in Config.MODELS.items():
+        for key, entry in Config.MODELS.items():
+            if isinstance(entry, tuple):
+                provider, model_id = entry
+                prov_tag = "☁️ CF" if provider == "cf" else "🟢 NV"
+            else:
+                model_id = entry
+                prov_tag = "🟢 NV"
             marker = "✅" if key == model_key else "▫️"
-            lines.append(f"{marker} `{key}` → {model_id}")
-        lines.append("\nبرای تعویض: `/model <نام>` مثلا `/model llama-3.1`")
+            lines.append(f"{marker} `{key}` {prov_tag} → {model_id}")
+        lines.append("\n*☁️ CF = Cloudflare (رایگان، پیشنهادی)*")
+        lines.append("*🟢 NV = NVIDIA (fallback)*")
+        lines.append("\nبرای تعویض: `/model <نام>` مثلا `/model glm-5.2`")
         tg.send_message(chat_id, "\n".join(lines), message_thread_id=answer_topic_id)
         return True
 
@@ -292,9 +316,16 @@ def handle_command(
             )
             return True
         db.set_user_model(user_id, key)
+        entry = Config.MODELS[key]
+        if isinstance(entry, tuple):
+            provider, model_id = entry
+            prov_name = "Cloudflare" if provider == "cf" else "NVIDIA"
+        else:
+            model_id = entry
+            prov_name = "NVIDIA"
         tg.send_message(
             chat_id,
-            f"✅ مدل شما به `{key}` (`{Config.MODELS[key]}`) تغییر کرد.",
+            f"✅ مدل شما به `{key}` ({prov_name}) تغییر کرد.\n`{model_id}`",
             message_thread_id=answer_topic_id,
         )
         return True
@@ -322,8 +353,11 @@ def handle_command(
 
     if lowered == "/clear_keys":
         # reset کردن cooldown همه‌ی کلیدها (برای مواقعی که کلیدها موقتاً سوختن)
-        cleared = key_manager.reset_cooldowns()
-        msg = f"🔓 cooldown همه‌ی کلیدها پاک شد.\n{cleared} کلید از حالت محدود خارج شد.\nالان {key_manager.available_keys()}/{key_manager.total_keys()} کلید فعال هست."
+        if key_manager:
+            cleared = key_manager.reset_cooldowns()
+            msg = f"🔓 cooldown همه‌ی کلیدها پاک شد.\n{cleared} کلید از حالت محدود خارج شد.\nالان {key_manager.available_keys()}/{key_manager.total_keys()} کلید فعال هست."
+        else:
+            msg = "ℹ️ کلید NVIDIA فعال نیست (فقط Cloudflare استفاده می‌شه). نیازی به /clear_keys نیست."
         tg.send_message(chat_id, msg, message_thread_id=stats_topic_id)
         return True
 
@@ -384,8 +418,9 @@ def _maybe_send_images_from_reply(tg: TelegramAPI, chat_id: int, message_thread_
 def run_agent_and_reply(
     tg: TelegramAPI,
     db: Storage,
-    key_manager: NvidiaKeyManager,
-    client: NvidiaAgentClient,
+    key_manager,
+    cf_client,
+    nvidia_client,
     chat_id: int,
     user_id: int,
     thoughts_topic_id: int,
@@ -394,11 +429,24 @@ def run_agent_and_reply(
     user_content,
     history_text_for_db: str,
 ) -> None:
-    model_key, model_id = resolve_model(db, user_id)
+    model_key, provider, model_id = resolve_model(db, user_id)
     history = db.get_history(user_id, Config.MAX_HISTORY_MESSAGES)
 
+    # انتخاب کلاینت بر اساس provider مدل
+    if provider == "cf":
+        client = cf_client
+    else:  # nvidia
+        client = nvidia_client
+        if client is None:
+            # NVIDIA تنظیم نشده — fallback به Cloudflare
+            client = cf_client
+            provider = "cf"
+            model_key = Config.DEFAULT_MODEL_KEY
+            _, _, model_id = resolve_model(db, user_id) if False else (Config.DEFAULT_MODEL_KEY, "cf", Config.CF_AI_MODEL)
+
     def on_usage(info: dict) -> None:
-        # هروقت کلید واقعاً عوض بشه (نه اولین درخواست)، توی تاپیک آمار خبر می‌دیم.
+        # هروقت کلید NVIDIA واقعاً عوض بشه، توی تاپیک آمار خبر می‌دیم.
+        # (Cloudflare کلید نداره، برای همین این فقط برای NVIDIA کار می‌کنه)
         if info.get("switched") and info.get("previous_masked_key"):
             try:
                 tg.send_message(
@@ -465,7 +513,17 @@ def run_agent_and_reply(
 
     # آمار کامل و به‌روزِ کلیدها رو بعد از هر پاسخ توی تاپیک آمار می‌فرستیم.
     try:
-        tg.send_message(chat_id, format_keys_stats_text(key_manager), message_thread_id=stats_topic_id)
+        if key_manager:
+            tg.send_message(chat_id, format_keys_stats_text(key_manager), message_thread_id=stats_topic_id)
+        else:
+            # فقط Cloudflare فعال هست
+            stats_msg = (
+                "☁️ *پروایدر: Cloudflare Workers AI*\n"
+                f"مدل: `{model_key}`\n"
+                f"تعداد پیام‌های شما: {db.count_messages(user_id)}\n"
+                f"زمان روشن بودن: {int((time.time() - START_TIME) // 60)} دقیقه"
+            )
+            tg.send_message(chat_id, stats_msg, message_thread_id=stats_topic_id)
     except Exception:
         pass
 
@@ -474,7 +532,7 @@ def run_agent_and_reply(
     db.trim_history(user_id, Config.MAX_HISTORY_MESSAGES)
 
 
-def handle_message(tg: TelegramAPI, db: Storage, key_manager: NvidiaKeyManager, client: NvidiaAgentClient, message: dict) -> None:
+def handle_message(tg: TelegramAPI, db: Storage, key_manager, cf_client, nvidia_client, message: dict) -> None:
     chat = message.get("chat", {})
     chat_id = chat.get("id")
     user_id = message.get("from", {}).get("id")
@@ -525,7 +583,7 @@ def handle_message(tg: TelegramAPI, db: Storage, key_manager: NvidiaKeyManager, 
                 {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}},
             ]
             run_agent_and_reply(
-                tg, db, key_manager, client, chat_id, user_id, thoughts_topic_id, answer_topic_id, stats_topic_id,
+                tg, db, key_manager, cf_client, nvidia_client, chat_id, user_id, thoughts_topic_id, answer_topic_id, stats_topic_id,
                 user_content, f"[عکس ارسال شد] {caption}",
             )
             return
@@ -573,14 +631,14 @@ def handle_message(tg: TelegramAPI, db: Storage, key_manager: NvidiaKeyManager, 
                 db_text = f"[فایل باینری ضمیمه: {file_name}] {caption}"
 
             run_agent_and_reply(
-                tg, db, key_manager, client, chat_id, user_id, thoughts_topic_id, answer_topic_id, stats_topic_id,
+                tg, db, key_manager, cf_client, nvidia_client, chat_id, user_id, thoughts_topic_id, answer_topic_id, stats_topic_id,
                 user_content, db_text,
             )
             return
 
         # --- متن معمولی ---
         run_agent_and_reply(
-            tg, db, key_manager, client, chat_id, user_id, thoughts_topic_id, answer_topic_id, stats_topic_id,
+            tg, db, key_manager, cf_client, nvidia_client, chat_id, user_id, thoughts_topic_id, answer_topic_id, stats_topic_id,
             text, text,
         )
 
@@ -614,16 +672,30 @@ def main() -> None:
 
     tg = TelegramAPI(Config.TELEGRAM_BOT_TOKEN)
     db = Storage(Config.DB_PATH)
-    key_manager = NvidiaKeyManager(
-        Config.NVIDIA_API_KEYS, Config.DEFAULT_KEY_COOLDOWN_SECONDS, Config.TOKEN_BUDGET_PER_KEY
+
+    # کلاینت اصلی: Cloudflare Workers AI
+    cf_client = CloudflareAIClient(
+        account_id=Config.CF_ACCOUNT_ID,
+        api_token=Config.CF_AI_TOKEN,
+        base_url=Config.CF_AI_BASE_URL,
+        model=Config.CF_AI_MODEL,
     )
-    client = NvidiaAgentClient(key_manager, Config.NVIDIA_BASE_URL, Config.NVIDIA_MODEL)
+
+    # کلاینت fallback: NVIDIA (اگه کلید NVIDIA تنظیم شده باشه)
+    nvidia_client = None
+    key_manager = None
+    if Config.NVIDIA_API_KEYS:
+        key_manager = NvidiaKeyManager(
+            Config.NVIDIA_API_KEYS, Config.DEFAULT_KEY_COOLDOWN_SECONDS, Config.TOKEN_BUDGET_PER_KEY
+        )
+        nvidia_client = NvidiaAgentClient(key_manager, Config.NVIDIA_BASE_URL, Config.NVIDIA_MODEL)
 
     start_health_server(Config.HEALTH_PORT)
 
     print(
         f"✅ ربات روشن شد. مدل پیش‌فرض: {Config.DEFAULT_MODEL_KEY} | "
-        f"تعداد کلید: {key_manager.total_keys()} | Concurrency: {Config.MAX_CONCURRENT_UPDATES}"
+        f"Cloudflare: ✅ | NVIDIA: {'✅' if nvidia_client else '❌'} | "
+        f"Concurrency: {Config.MAX_CONCURRENT_UPDATES}"
     )
 
     offset_raw = db.get_state(STATE_KEY_OFFSET)
@@ -634,7 +706,7 @@ def main() -> None:
     def _process(message: dict) -> None:
         from_id = message.get("from", {}).get("id")
         try:
-            handle_message(tg, db, key_manager, client, message)
+            handle_message(tg, db, key_manager, cf_client, nvidia_client, message)
             print(f"✅ پیام از {from_id} پردازش شد.")
         except Exception:
             print("⚠️ خطا در پردازش پیام:")
