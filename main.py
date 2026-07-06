@@ -140,7 +140,7 @@ class TypingLoop:
 class StreamEditor:
     """
     پاسخ نهایی رو به‌جای یک پیام کامل، به‌صورت زنده (استریم) توی تلگرام ادیت می‌کنه.
-    اولین تکه‌ی متن، یه پیام جدید می‌فرسته و تکه‌های بعدی همون پیام رو edit می‌کنن.
+    نسخه بهینه‌شده با Thread پس‌زمینه برای جلوگیری از Rate Limit تلگرام.
     """
 
     def __init__(self, tg: TelegramAPI, chat_id: int, message_thread_id: int, min_interval: float):
@@ -148,43 +148,47 @@ class StreamEditor:
         self._chat_id = chat_id
         self._thread_id = message_thread_id
         self._min_interval = min_interval
+        
         self._lock = threading.Lock()
         self._message_id: int | None = None
         self._buffer = ""
-        self._last_edit = 0.0
-        self._first_edit_done = False
+        self._last_sent_text = ""
+        self._is_finished = False
+        
+        self._flush_thread = threading.Thread(target=self._flush_loop, daemon=True)
+        self._flush_thread.start()
 
     def add_delta(self, piece: str) -> None:
         with self._lock:
             self._buffer += piece
-            now = time.time()
-            # اولین ادیت زودتر انجام بشه تا کاربر سریع‌تر چیزی ببینه
-            if not self._first_edit_done:
-                if now - self._last_edit < Config.STREAM_FIRST_EDIT_DELAY:
-                    return
-            else:
-                if now - self._last_edit < self._min_interval:
-                    return
-            text = self._buffer
-            self._last_edit = now
-            self._first_edit_done = True
-        self._flush(text)
 
     def finalize(self, final_text: str) -> None:
         with self._lock:
             self._buffer = final_text
+            self._is_finished = True
+        self._flush_thread.join(timeout=2.0)
         self._flush(final_text, force=True)
+
+    def _flush_loop(self):
+        while True:
+            with self._lock:
+                if self._is_finished:
+                    break
+                current_text = self._buffer
+            
+            if current_text and current_text != self._last_sent_text:
+                self._flush(current_text, force=False)
+                self._last_sent_text = current_text
+                
+            time.sleep(self._min_interval)
 
     def _flush(self, text: str, force: bool = False) -> None:
         text = text.strip() or "..."
-        # ⚡ بهینه‌سازی سرعت: در حین استریم (force=False)، متن اغلب مارک‌داون ناقص/نامعتبر
-        # داره (مثلا ** یا ``` بسته‌نشده)، که باعث خطای "can't parse entities" تو تلگرام
-        # می‌شد و هر ادیت مجبور می‌شد ۲ بار درخواست بزنه (یک بار با parse_mode، یک بار بدون).
-        # این round-trip دوم رو با غیرفعال کردن parse_mode در حالت استریم حذف می‌کنیم؛
-        # فرمت نهایی (Markdown) فقط روی پیام قطعی (force=True) اعمال می‌شه.
         parse_mode = "Markdown" if force else None
+        
         for chunk in split_long_text(text):
-            display = chunk + ("\n▌" if not force else "")
+            display = chunk + ("
+▌" if not force else "")
             try:
                 if self._message_id is None:
                     result = self._tg.send_message(
@@ -194,13 +198,12 @@ class StreamEditor:
                 else:
                     self._tg.edit_message_text(self._chat_id, self._message_id, display, parse_mode=parse_mode)
             except Exception as e:
-                # اگه edit خطا بده، یه پیام جدید بفرست
                 if self._message_id is not None and force:
                     try:
                         self._tg.send_message(self._chat_id, display, message_thread_id=self._thread_id)
                     except Exception:
                         pass
-            break  # فعلا فقط اولین تکه رو زنده ادیت می‌کنیم
+            break
 
         if force and len(text) > 3800:
             rest = text[3800:]
