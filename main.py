@@ -667,6 +667,60 @@ class HealthHandler(BaseHTTPRequestHandler):
         self.send_response(404)
         self.end_headers()
 
+    def do_POST(self):
+        import json
+        from urllib.parse import urlparse
+        
+        parsed_path = urlparse(self.path)
+        path = parsed_path.path
+        
+        if path == "/api/chat":
+            content_length = int(self.headers.get('Content-Length', 0))
+            post_data = self.rfile.read(content_length)
+            
+            try:
+                data = json.loads(post_data.decode('utf-8'))
+                user_message = data.get("message", "")
+                history = data.get("history", [])
+                
+                # Format history for the agent
+                agent_history = []
+                for msg in history:
+                    if msg.get("role") in ["user", "assistant"] and msg.get("content"):
+                        agent_history.append({"role": msg["role"], "content": msg["content"]})
+                        
+                client = app_state.get('client')
+                if not client:
+                    self.send_response(500)
+                    self.end_headers()
+                    return
+                    
+                # We can't stream easily without text/event-stream, so we'll just block and return the final answer.
+                from agent import run_agent
+                result = run_agent(
+                    client=client,
+                    history=agent_history,
+                    user_content=user_message,
+                )
+                
+                response_data = {"reply": result.final_answer}
+                
+                body = json.dumps(response_data).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+                return
+            except Exception as e:
+                self.send_response(500)
+                self.end_headers()
+                return
+                
+        self.send_response(404)
+        self.end_headers()
+
+
     def log_message(self, format, *args):
         pass
 
@@ -677,6 +731,8 @@ def start_health_server(port: int) -> None:
     thread.start()
     print(f"❤️ Health endpoint روی پورت {port} در مسیر /health بالا اومد.")
 
+
+app_state = {}
 
 def main() -> None:
     Config.validate()
@@ -694,6 +750,9 @@ def main() -> None:
         model=Config.MODELS.get(Config.DEFAULT_MODEL_KEY, "@cf/meta/llama-3.3-70b-instruct-fp8-fast"),
     )
 
+    app_state['db'] = db
+    app_state['client'] = client
+    app_state['tg'] = tg
     start_health_server(Config.HEALTH_PORT)
 
     print(

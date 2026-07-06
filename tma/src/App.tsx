@@ -53,14 +53,15 @@ export default function App() {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages, isTyping]);
 
-  const handleSend = (e?: React.FormEvent) => {
+  const handleSend = async (e?: React.FormEvent) => {
     e?.preventDefault();
-    if (!inputValue.trim()) return;
+    if (!inputValue.trim() || isTyping) return;
 
+    const currentInput = inputValue.trim();
     const newUserMsg: Message = {
       id: Date.now().toString(),
       role: 'user',
-      content: inputValue.trim(),
+      content: currentInput,
       timestamp: new Date(),
       status: 'sending',
     };
@@ -69,23 +70,49 @@ export default function App() {
     setInputValue('');
     setIsTyping(true);
 
-    // Mock API Response
-    setTimeout(() => {
+    try {
+      // Prepare history
+      const history = messages.map(m => ({ role: m.role, content: m.content }));
+      
+      const response = await fetch('/api/chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ message: currentInput, history }),
+      });
+
+      if (!response.ok) throw new Error('Network response was not ok');
+      
+      const data = await response.json();
+      
       setMessages((prev) =>
         prev.map((msg) => (msg.id === newUserMsg.id ? { ...msg, status: 'sent' } : msg))
       );
-      
+
       const newAiMsg: Message = {
         id: (Date.now() + 1).toString(),
         role: 'assistant',
-        content: 'در حال پردازش درخواست شما هستم... (این یک پاسخ نمونه در رابط کاربری است و باید به وب‌هوک ربات متصل شود).',
+        content: data.reply || 'پاسخی دریافت نشد.',
         timestamp: new Date(),
         status: 'sent',
       };
       
       setMessages((prev) => [...prev, newAiMsg]);
+    } catch (error) {
+      console.error(error);
+      setMessages((prev) =>
+        prev.map((msg) => (msg.id === newUserMsg.id ? { ...msg, status: 'error' } : msg))
+      );
+      const errorMsg: Message = {
+        id: (Date.now() + 1).toString(),
+        role: 'assistant',
+        content: '⚠️ خطایی در ارتباط با سرور رخ داد. لطفا دوباره تلاش کنید.',
+        timestamp: new Date(),
+        status: 'error',
+      };
+      setMessages((prev) => [...prev, errorMsg]);
+    } finally {
       setIsTyping(false);
-    }, 1500);
+    }
   };
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
@@ -110,7 +137,7 @@ export default function App() {
           </div>
         </div>
         <div className="flex gap-2">
-          <button className="p-2 hover:bg-slate-100 rounded-lg border border-slate-200 text-slate-600 transition-colors">
+          <button className="p-2 hover:bg-slate-100 rounded-lg border border-slate-200 text-slate-600 transition-colors" onClick={() => { if(window.Telegram?.WebApp) { window.Telegram.WebApp.showAlert("امکانات پروفایل و تاریخچه به‌زودی اضافه می‌شود."); } else { alert("امکانات پروفایل و تاریخچه به‌زودی اضافه می‌شود."); } }}>
             <Menu className="w-5 h-5" />
           </button>
           <button className="p-2 hover:bg-slate-100 rounded-lg border border-slate-200 text-slate-600 transition-colors hidden sm:block">
