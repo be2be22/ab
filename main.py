@@ -619,16 +619,53 @@ def handle_message(tg: TelegramAPI, db: Storage, token_manager: CloudflareTokenM
 
 class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
-        if self.path in ("/health", "/"):
+        import os
+        from urllib.parse import urlparse
+        
+        parsed_path = urlparse(self.path)
+        path = parsed_path.path
+        
+        if path == "/health":
             body = b'{"status":"ok"}'
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
-        else:
-            self.send_response(404)
-            self.end_headers()
+            return
+            
+        # Serve TMA static files
+        tma_dist = os.path.join(os.path.dirname(__file__), "tma", "dist")
+        if path == "/":
+            path = "/index.html"
+            
+        file_path = os.path.join(tma_dist, path.lstrip("/"))
+        
+        # SPA routing: if file doesn't exist, serve index.html
+        if not os.path.exists(file_path) and os.path.exists(os.path.join(tma_dist, "index.html")):
+            file_path = os.path.join(tma_dist, "index.html")
+            
+        if os.path.exists(file_path) and not os.path.isdir(file_path):
+            try:
+                with open(file_path, "rb") as f:
+                    content = f.read()
+                
+                self.send_response(200)
+                
+                import mimetypes
+                ctype, _ = mimetypes.guess_type(file_path)
+                if ctype:
+                    self.send_header("Content-Type", ctype)
+                
+                self.send_header("Content-Length", str(len(content)))
+                self.end_headers()
+                self.wfile.write(content)
+                return
+            except Exception:
+                pass
+                
+        self.send_response(404)
+        self.end_headers()
 
     def log_message(self, format, *args):
         pass
