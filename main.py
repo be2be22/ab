@@ -695,6 +695,796 @@ class HealthHandler(BaseHTTPRequestHandler):
                     self.end_headers()
                     return
                     
+                from agent import run_agent
+                import time
+                from config import Config
+                
+                start_time = time.time()
+                
+                req_model = data.get("model", "glm-5.2")
+                req_model = Config.MODELS.get(req_model, req_model)
+                chat_id = data.get("chat_id", "")
+                
+                tool_context = {
+                    "tg": app_state.get('tg'),
+                    "chat_id": chat_id,
+                }
+                
+                attachment = data.get("attachment")
+                user_content_to_agent = user_message
+                
+                if attachment and attachment.get("base64"):
+                    b64 = attachment["base64"]
+                    mime = attachment.get("mime_type", "application/octet-stream")
+                    fname = attachment.get("filename", "file")
+                    if mime.startswith("image/"):
+                        user_content_to_agent = [
+                            {"type": "text", "text": user_message or "این عکس رو تحلیل کن."},
+                            {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64}"}}
+                        ]
+                    else:
+                        try:
+                            import base64
+                            decoded = base64.b64decode(b64).decode("utf-8")
+                            user_content_to_agent = f"{user_message}\n\n[محتوای فایل {fname}]:\n{decoded}"
+                        except Exception:
+                            user_content_to_agent = f"{user_message}\n\n[فایل باینری ضمیمه شد: {fname}]"
+
+                # Send SSE headers
+                self.send_response(200)
+                self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+                self.send_header("Cache-Control", "no-cache")
+                self.send_header("Connection", "keep-alive")
+                self.end_headers()
+                
+                def send_sse(event, payload):
+                    try:
+                        self.wfile.write(f"event: {event}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n".encode('utf-8'))
+                        self.wfile.flush()
+                    except:
+                        pass
+                
+                def on_reasoning_delta(chunk):
+                    if chunk: send_sse("reasoning", {"chunk": chunk})
+                
+                def on_content_delta(chunk):
+                    if chunk: send_sse("content", {"chunk": chunk})
+                    
+                def on_step_start():
+                    send_sse("step", {"msg": "start"})
+
+                try:
+                    result = run_agent(
+                        client=client,
+                        history=agent_history,
+                        user_content=user_content_to_agent,
+                        model=req_model,
+                        tool_context=tool_context,
+                        on_reasoning_delta=on_reasoning_delta,
+                        on_content_delta=on_content_delta,
+                        on_step_start=on_step_start
+                    )
+                    
+                    duration = round(time.time() - start_time, 2)
+                    send_sse("done", {
+                        "reply": result.final_answer,
+                        "thoughts": result.thoughts,
+                        "duration": duration
+                    })
+                except Exception as e:
+                    import traceback
+                    traceback.print_exc()
+                    send_sse("error", {"message": str(e)})
+                    
+                return
+            except Exception as e:
+                import traceback
+                traceback.print_exc()
+                self.send_response(400)
+                self.send_header('Content-Type', 'application/json')
+                self.end_headers()
+                self.wfile.write(json.dumps({"error": str(e)}).encode('utf-8'))
+                return
+                
+        self.send_response(404)
+        self.end_headers()
+
+def run_server(port=t json
+import mimetypes
+import re
+import threading
+import time
+import traceback
+from concurrent.futures import ThreadPoolExecutor
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+from config import Config
+from cf_client import CloudflareAIClient
+from cf_key_manager import CloudflareTokenManager
+from telegram_api import TelegramAPI, split_long_text
+from storage import Storage
+from agent import run_agent
+
+THOUGHTS_TOPIC_NAME = "🧠 فکرها"
+ANSWER_TOPIC_NAME = "💬 پاسخ نهایی"
+STATS_TOPIC_NAME = "🔑 آمار و توکن‌ها"
+
+STATE_KEY_OFFSET = "last_update_offset"
+
+TEXT_FILE_EXTENSIONS = {
+    ".txt", ".md", ".csv", ".json", ".py", ".log", ".yaml", ".yml",
+    ".xml", ".html", ".htm", ".ini", ".cfg", ".toml", ".sh", ".js",
+    ".ts", ".java", ".c", ".cpp", ".go", ".rs", ".sql",
+}
+
+START_TIME = time.time()
+
+# قفل جدا برای هر کاربر تا پیام‌های همزمانِ یک کاربر روی هم ننویسن
+_user_locks: dict[int, threading.Lock] = {}
+_user_locks_guard = threading.Lock()
+
+
+def _get_user_lock(user_id: int) -> threading.Lock:
+    with _user_locks_guard:
+        lock = _user_locks.get(user_id)
+        if lock is None:
+            lock = threading.Lock()
+            _user_locks[user_id] = lock
+        return lock
+
+
+def ensure_topics(tg: TelegramAPI, db: Storage, chat_id: int, user_id: int) -> tuple[int, int, int]:
+    """سه تاپیک برای هر کاربر می‌سازه (یا برمی‌گردونه): فکرها، پاسخ نهایی، آمار."""
+    existing = db.get_topics(user_id)
+
+    # حالت ۱: همه‌ی تاپیک‌ها موجوده
+    if existing and existing[0] and existing[1] and existing[2]:
+        return existing[0], existing[1], existing[2]
+
+    # حالت ۲: کاربر قدیمی — فقط تاپیک‌های کم‌شده رو بساز
+    if existing and existing[0] and existing[1] and not existing[2]:
+        stats_topic = tg.create_forum_topic(chat_id, STATS_TOPIC_NAME)
+        stats_id = stats_topic["message_thread_id"]
+        db.set_stats_topic(user_id, stats_id)
+        tg.send_message(
+            chat_id,
+            "این تاپیک وضعیت توکن‌های Cloudflare و مصرف‌شون رو نشون می‌ده 🔑\n"
+            "برای دیدن آمار کامل، /stats رو بفرست.",
+            message_thread_id=stats_id,
+        )
+        return existing[0], existing[1], stats_id
+
+    # حالت ۳: کاربر جدید — همه‌ی تاپیک‌ها رو بساز
+    thoughts_topic = tg.create_forum_topic(chat_id, THOUGHTS_TOPIC_NAME)
+    answer_topic = tg.create_forum_topic(chat_id, ANSWER_TOPIC_NAME)
+    stats_topic = tg.create_forum_topic(chat_id, STATS_TOPIC_NAME)
+
+    thoughts_id = thoughts_topic["message_thread_id"]
+    answer_id = answer_topic["message_thread_id"]
+    stats_id = stats_topic["message_thread_id"]
+
+    db.save_topics(user_id, thoughts_id, answer_id, stats_id)
+
+    tg.send_message(chat_id, "این تاپیک برای فکرها و مراحل داخلی ایجنته 🧠", message_thread_id=thoughts_id)
+    tg.send_message(chat_id, "پاسخ‌های نهایی من اینجا میاد 💬", message_thread_id=answer_id)
+    tg.send_message(
+        chat_id,
+        "این تاپیک وضعیت توکن‌های Cloudflare و مصرف‌شون رو نشون می‌ده 🔑\n"
+        "برای دیدن آمار کامل، /stats رو بفرست.",
+        message_thread_id=stats_id,
+    )
+    return thoughts_id, answer_id, stats_id
+
+
+def format_tokens_stats_text(token_manager: CloudflareTokenManager, header: str = "🔑 *وضعیت توکن‌های Cloudflare*") -> str:
+    lines = [header]
+    active_masked = token_manager.active_token_masked()
+    lines.append(f"توکنِ در حالِ استفاده الان: `{active_masked or 'هنوز درخواستی زده نشده'}`")
+    lines.append("")
+    for item in token_manager.usage_snapshot():
+        marker = "🟢" if item["is_active"] else ("⚪" if item["available"] else "🔴")
+        line = (
+            f"{marker} توکن {item['index']} (`{item['masked']}`) — "
+            f"{item['requests']} درخواست — "
+            f"{item['total_tokens']} توکن (ورودی {item['prompt_tokens']} / خروجی {item['completion_tokens']})"
+        )
+        if not item["available"]:
+            line += f" — 🚫 محدود ({item['cooldown_seconds']:.0f} ثانیه دیگه)"
+        lines.append(line)
+    return "\n".join(lines)
+
+
+def send_long(tg: TelegramAPI, chat_id: int, text: str, message_thread_id: int) -> None:
+    for chunk in split_long_text(text):
+        tg.send_message(chat_id, chunk, message_thread_id=message_thread_id)
+
+
+class TypingLoop:
+    """تا وقتی ایجنت داره کار می‌کنه، هر چند ثانیه یک‌بار 'در حال نوشتن...' رو دوباره می‌فرسته."""
+
+    def __init__(self, tg: TelegramAPI, chat_id: int, message_thread_id: int, interval: float = 4.0):
+        self._tg = tg
+        self._chat_id = chat_id
+        self._thread_id = message_thread_id
+        self._interval = interval
+        self._stop_event = threading.Event()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+
+    def _run(self):
+        while not self._stop_event.is_set():
+            try:
+                self._tg.send_chat_action(self._chat_id, "typing", message_thread_id=self._thread_id)
+            except Exception:
+                pass
+            self._stop_event.wait(self._interval)
+
+    def __enter__(self):
+        self._thread.start()
+        return self
+
+    def __exit__(self, *exc):
+        self._stop_event.set()
+        self._thread.join(timeout=1)
+
+
+class StreamEditor:
+    """
+    پاسخ نهایی رو به‌جای یک پیام کامل، به‌صورت زنده (استریم) توی تلگرام ادیت می‌کنه.
+    نسخه بهینه‌شده با Thread پس‌زمینه برای جلوگیری از Rate Limit تلگرام.
+    """
+
+    def __init__(self, tg: TelegramAPI, chat_id: int, message_thread_id: int, min_interval: float):
+        self._tg = tg
+        self._chat_id = chat_id
+        self._thread_id = message_thread_id
+        self._min_interval = min_interval
+        
+        self._lock = threading.Lock()
+        self._message_id: int | None = None
+        self._buffer = ""
+        self._last_sent_text = ""
+        self._is_finished = False
+        
+        self._flush_thread = threading.Thread(target=self._flush_loop, daemon=True)
+        self._flush_thread.start()
+
+    def add_delta(self, piece: str) -> None:
+        with self._lock:
+            self._buffer += piece
+
+    def finalize(self, final_text: str) -> None:
+        with self._lock:
+            self._buffer = final_text
+            self._is_finished = True
+        self._flush_thread.join(timeout=2.0)
+        self._flush(final_text, force=True)
+
+    def _flush_loop(self):
+        while True:
+            with self._lock:
+                if self._is_finished:
+                    break
+                current_text = self._buffer
+            
+            if current_text and current_text != self._last_sent_text:
+                self._flush(current_text, force=False)
+                self._last_sent_text = current_text
+                
+            time.sleep(self._min_interval)
+
+    def _flush(self, text: str, force: bool = False) -> None:
+        text = text.strip() or "..."
+        parse_mode = "Markdown" if force else None
+        
+        for chunk in split_long_text(text):
+            display = chunk + ("\n▌" if not force else "")
+            try:
+                if self._message_id is None:
+                    result = self._tg.send_message(
+                        self._chat_id, display, message_thread_id=self._thread_id, parse_mode=parse_mode
+                    )
+                    self._message_id = result["message_id"]
+                else:
+                    self._tg.edit_message_text(self._chat_id, self._message_id, display, parse_mode=parse_mode)
+            except Exception as e:
+                if self._message_id is not None and force:
+                    try:
+                        self._tg.send_message(self._chat_id, display, message_thread_id=self._thread_id)
+                    except Exception:
+                        pass
+            break
+
+        if force and len(text) > 3800:
+            rest = text[3800:]
+            send_long(self._tg, self._chat_id, rest, self._thread_id)
+
+
+def resolve_model(db: Storage, user_id: int) -> tuple[str, str]:
+    """(model_key, model_id) رو برمی‌گردونه."""
+    model_key = db.get_user_model(user_id) or Config.DEFAULT_MODEL_KEY
+    if model_key not in Config.MODELS:
+        model_key = Config.DEFAULT_MODEL_KEY
+    return model_key, Config.MODELS.get(model_key, Config.MODELS[Config.DEFAULT_MODEL_KEY])
+
+
+def build_file_attachment_text(file_name: str, text_content: str) -> str:
+    truncated = text_content[: Config.MAX_FILE_TEXT_CHARS]
+    note = ""
+    if len(text_content) > Config.MAX_FILE_TEXT_CHARS:
+        note = f"\n...[محتوا به خاطر طول زیاد، به {Config.MAX_FILE_TEXT_CHARS} کاراکتر اول محدود شد]"
+    return f"[فایل ضمیمه: {file_name}]\n```\n{truncated}{note}\n```"
+
+
+def is_command(text: str | None) -> bool:
+    """بررسی می‌کنه که آیا پیام یه دستور هست (با / شروع می‌شه) یا نه.
+    اگه دستور باشه، ربات مستقیم جواب می‌ده و ایجنت صدا زده نمی‌شه."""
+    if not text:
+        return False
+    return text.strip().startswith("/")
+
+
+def handle_command(
+    tg: TelegramAPI,
+    db: Storage,
+    token_manager: CloudflareTokenManager,
+    chat_id: int,
+    user_id: int,
+    thoughts_topic_id: int,
+    answer_topic_id: int,
+    stats_topic_id: int,
+    text: str,
+) -> bool:
+    """اگه پیام یک دستور بود، پردازشش می‌کنه و True برمی‌گردونه؛ وگرنه False.
+    همه‌ی پیام‌هایی که با / شروع بشن، اینجا هندل می‌شن — اگه دستور شناخته‌شده نبود،
+    یه پیام راهنما می‌فرستیم و ایجنت صدا زده نمی‌شه."""
+    stripped = text.strip()
+    lowered = stripped.lower()
+
+    if lowered == "/start":
+        tg.send_message(
+            chat_id,
+            "👋 سلام! من یه دستیار هوشمند فارسی‌زبانم که روی سرور اجرا می‌شم.\n\n"
+            "✨ می‌تونم:\n"
+            "• به سوالاتت جواب بدم\n"
+            "• تو وب جستجو کنم (قیمت، اخبار، ...)\n"
+            "• کد پایتون و شل اجرا کنم\n"
+            "• فایل و عکس بفرستم\n\n"
+            "📝 پیامت رو بفرست تا شروع کنیم!\n\n"
+            "دستورات: /help /stats /models /model /reset /export /clear_tokens",
+            message_thread_id=answer_topic_id,
+        )
+        return True
+
+    if lowered == "/stats":
+        model_key, model_id = resolve_model(db, user_id)
+        msg = (
+            "📊 *آمار ربات*\n"
+            f"- پیام‌های شما: {db.count_messages(user_id)}\n"
+            f"- کل پیام‌های ثبت‌شده: {db.count_messages()}\n"
+            f"- تعداد کاربران فعال: {db.count_users()}\n"
+            f"- مدل فعلی شما: `{model_key}` → `{model_id}`\n"
+            f"- توکن‌های Cloudflare فعال: {token_manager.available_tokens_count()}/{token_manager.total_tokens_count()}\n"
+            f"- کل درخواست‌ها: {token_manager.total_requests()}\n"
+            f"- کل توکن مصرفی: {token_manager.total_tokens_used():,}\n"
+            f"- زمان روشن بودن: {int((time.time() - START_TIME) // 60)} دقیقه\n\n"
+            f"{format_tokens_stats_text(token_manager, header='🔑 *ریز مصرف توکن‌ها:*')}"
+        )
+        tg.send_message(chat_id, msg, message_thread_id=answer_topic_id)
+        return True
+
+    if lowered == "/models":
+        model_key, _ = resolve_model(db, user_id)
+        lines = ["📚 *مدل‌های قابل انتخاب:*"]
+        for key, model_id in Config.MODELS.items():
+            marker = "✅" if key == model_key else "▫️"
+            lines.append(f"{marker} `{key}` → {model_id}")
+        lines.append("\n*پیش‌فرض:* `glm-5.2` (reasoning، دقیق‌تر) — برای پاسخ سریع‌تر: `llama-3.3-70b`")
+        lines.append("\nبرای تعویض: `/model <نام>` مثلا `/model glm-5.2`")
+        tg.send_message(chat_id, "\n".join(lines), message_thread_id=answer_topic_id)
+        return True
+
+    if lowered.startswith("/model"):
+        parts = stripped.split(maxsplit=1)
+        if len(parts) < 2 or not parts[1].strip():
+            tg.send_message(
+                chat_id,
+                "برای دیدن لیست مدل‌ها از /models استفاده کن. مثال تعویض: `/model glm-5.2`",
+                message_thread_id=answer_topic_id,
+            )
+            return True
+        key = parts[1].strip()
+        if key not in Config.MODELS:
+            tg.send_message(
+                chat_id,
+                f"❌ مدل `{key}` شناخته‌شده نیست. لیست مدل‌ها: /models",
+                message_thread_id=answer_topic_id,
+            )
+            return True
+        db.set_user_model(user_id, key)
+        tg.send_message(
+            chat_id,
+            f"✅ مدل شما به `{key}` (`{Config.MODELS[key]}`) تغییر کرد.",
+            message_thread_id=answer_topic_id,
+        )
+        return True
+
+    if lowered == "/reset":
+        removed = db.reset_history(user_id)
+        tg.send_message(
+            chat_id,
+            f"🗑️ تاریخچه‌ی گفتگوی شما پاک شد ({removed} پیام حذف شد).",
+            message_thread_id=answer_topic_id,
+        )
+        return True
+
+    if lowered == "/export":
+        history = db.get_full_history(user_id)
+        payload = json.dumps(history, ensure_ascii=False, indent=2).encode("utf-8")
+        tg.send_document(
+            chat_id,
+            filename=f"chat_history_{user_id}.json",
+            content_bytes=payload,
+            caption=f"تاریخچه‌ی گفتگو ({len(history)} پیام)",
+            message_thread_id=answer_topic_id,
+        )
+        return True
+
+    if lowered == "/clear_tokens":
+        # reset کردن cooldown همه‌ی توکن‌ها
+        cleared = token_manager.reset_cooldowns()
+        msg = (
+            f"🔓 cooldown همه‌ی توکن‌ها پاک شد.\n"
+            f"{cleared} توکن از حالت محدود خارج شد.\n"
+            f"الان {token_manager.available_tokens_count()}/{token_manager.total_tokens_count()} توکن فعال هست."
+        )
+        tg.send_message(chat_id, msg, message_thread_id=stats_topic_id)
+        return True
+
+    if lowered == "/help":
+        help_text = (
+            "🤖 *راهنمای ربات*\n\n"
+            "*دستورات:*\n"
+            "• `/stats` - نمایش آمار کامل ربات و توکن‌ها\n"
+            "• `/models` - لیست مدل‌های قابل انتخاب\n"
+            "• `/model <name>` - تعویض مدل\n"
+            "• `/reset` - پاک کردن تاریخچه\n"
+            "• `/export` - خروجی JSON تاریخچه\n"
+            "• `/clear_tokens` - پاک کردن cooldown توکن‌ها\n"
+            "• `/help` - این راهنما\n\n"
+            "*قابلیت‌ها:*\n"
+            "• 📝 ارسال متن برای چت با ایجنت\n"
+            "• 📷 ارسال عکس برای تحلیل تصویر\n"
+            "• 📎 ارسال فایل (متنی یا باینری)\n"
+            "• 🔍 جستجوی وب (به‌صورت خودکار وقتی لازم باشه)\n"
+            "• 💻 اجرای کد پایتون و شل\n"
+            "• 📤 ارسال فایل/عکس از طرف ربات به کاربر\n"
+            "• ⚡ پاسخ استریمی زنده\n\n"
+            "*تاپیک‌ها:*\n"
+            "• 🧠 فکرها - مراحل فکر ایجنت\n"
+            "• 💬 پاسخ نهایی - جواب نهایی\n"
+            "• 🔑 آمار و توکن‌ها - وضعیت توکن‌های Cloudflare\n\n"
+            "*مدل‌های پیشنهادی:*\n"
+            "• `glm-5.2` - reasoning، دقیق‌تر (پیش‌فرض)\n"
+            "• `llama-3.3-70b` - سریع‌تر، برای پاسخ فوری\n\n"
+            "برای سوال زمان‌مندی (قیمت، اخبار، آب‌وهوا) فقط بپرس، خودم جستجو می‌کنم!"
+        )
+        tg.send_message(chat_id, help_text, message_thread_id=answer_topic_id)
+        return True
+
+    # اگه پیام با / شروع شده ولی دستور شناخته‌شده نبود، یه پیام راهنما بفرست
+    # و ایجنت صدا زده نمی‌شه (return True)
+    if is_command(text):
+        tg.send_message(
+            chat_id,
+            f"❓ دستور `{stripped}` شناخته نشد.\n\n"
+            "دستورات موجود:\n"
+            "• `/start` - شروع ربات\n"
+            "• `/help` - راهنمای کامل\n"
+            "• `/stats` - آمار ربات\n"
+            "• `/models` - لیست مدل‌ها\n"
+            "• `/model <name>` - تعویض مدل\n"
+            "• `/reset` - پاک کردن تاریخچه\n"
+            "• `/export` - خروجی تاریخچه\n"
+            "• `/clear_tokens` - پاک کردن cooldown توکن‌ها",
+            message_thread_id=answer_topic_id,
+        )
+        return True
+
+    return False
+
+
+def _maybe_send_images_from_reply(tg: TelegramAPI, chat_id: int, message_thread_id: int, text: str) -> None:
+    """اگه مدل تو خروجیش Markdown image گذاشته، ربات خودکار عکس رو بفرسته."""
+    if not Config.AUTO_SEND_IMAGES_IN_REPLY:
+        return
+    pattern = re.compile(
+        r"!\[([^\]]*)\]\((https?://[^\s)]+\.(?:jpg|jpeg|png|gif|webp)(?:\?[^\s)]*)?)\)",
+        re.IGNORECASE,
+    )
+    matches = pattern.findall(text)
+    for alt, url in matches[:5]:
+        try:
+            if url.lower().endswith(".gif") or ".gif?" in url.lower():
+                tg.send_animation_by_url(chat_id, url, caption=alt or None, message_thread_id=message_thread_id)
+            else:
+                tg.send_photo_by_url(chat_id, url, caption=alt or None, message_thread_id=message_thread_id)
+        except Exception as e:
+            print(f"⚠️ ارسال عکس خودکار ناموفق: {e}")
+
+
+def run_agent_and_reply(
+    tg: TelegramAPI,
+    db: Storage,
+    token_manager: CloudflareTokenManager,
+    client: CloudflareAIClient,
+    chat_id: int,
+    user_id: int,
+    thoughts_topic_id: int,
+    answer_topic_id: int,
+    stats_topic_id: int,
+    user_content,
+    history_text_for_db: str,
+) -> None:
+    model_key, model_id = resolve_model(db, user_id)
+    history = db.get_history(user_id, Config.MAX_HISTORY_MESSAGES)
+
+    def on_usage(info: dict) -> None:
+        # هروقت توکن واقعاً عوض بشه، توی تاپیک آمار خبر می‌دیم.
+        if info.get("switched"):
+            try:
+                tg.send_message(
+                    chat_id,
+                    f"🔁 توکن به توکن بعدی تغییر یافت: `{token_manager.active_token_masked() or '?'}`",
+                    message_thread_id=stats_topic_id,
+                )
+            except Exception:
+                pass
+
+    tool_context = {"tg": tg, "chat_id": chat_id, "answer_topic_id": answer_topic_id}
+
+    if Config.STREAM_ENABLED:
+        streamer = StreamEditor(tg, chat_id, answer_topic_id, Config.STREAM_EDIT_MIN_INTERVAL)
+        try:
+            with TypingLoop(tg, chat_id, answer_topic_id):
+                result = run_agent(
+                    client,
+                    history,
+                    user_content,
+                    model=model_id,
+                    on_content_delta=streamer.add_delta,
+                    on_usage=on_usage,
+                    tool_context=tool_context,
+                )
+            streamer.finalize(result.final_answer)
+        except Exception as e:
+            err_text = f"⚠️ خطای غیرمنتظره: {e}"
+            print(f"⚠️ run_agent_and_reply error: {type(e).__name__}: {e}")
+            traceback.print_exc()
+            try:
+                streamer.finalize(err_text)
+            except Exception:
+                try:
+                    tg.send_message(chat_id, err_text, message_thread_id=answer_topic_id)
+                except Exception:
+                    pass
+            from agent import AgentResult
+            result = AgentResult(thoughts=[], final_answer=err_text)
+    else:
+        try:
+            with TypingLoop(tg, chat_id, answer_topic_id):
+                result = run_agent(client, history, user_content, model=model_id, on_usage=on_usage, tool_context=tool_context)
+            send_long(tg, chat_id, result.final_answer, answer_topic_id)
+        except Exception as e:
+            err_text = f"⚠️ خطای غیرمنتظره: {e}"
+            print(f"⚠️ run_agent_and_reply error: {type(e).__name__}: {e}")
+            traceback.print_exc()
+            tg.send_message(chat_id, err_text, message_thread_id=answer_topic_id)
+            from agent import AgentResult
+            result = AgentResult(thoughts=[], final_answer=err_text)
+
+    # ارسال خودکار عکس‌هایی که مدل تو پاسخش گذاشته
+    _maybe_send_images_from_reply(tg, chat_id, answer_topic_id, result.final_answer)
+
+    if result.thoughts:
+        send_long(tg, chat_id, "\n\n---\n\n".join(result.thoughts), thoughts_topic_id)
+    else:
+        tg.send_message(chat_id, "(این بار فکر خاصی ثبت نشد)", message_thread_id=thoughts_topic_id)
+
+    # آمار به‌روز توکن‌ها رو بعد از هر پاسخ توی تاپیک آمار می‌فرستیم.
+    try:
+        tg.send_message(chat_id, format_tokens_stats_text(token_manager), message_thread_id=stats_topic_id)
+    except Exception:
+        pass
+
+    db.add_message(user_id, "user", history_text_for_db)
+    db.add_message(user_id, "assistant", result.final_answer)
+    db.trim_history(user_id, Config.MAX_HISTORY_MESSAGES)
+
+
+def handle_message(tg: TelegramAPI, db: Storage, token_manager: CloudflareTokenManager, client: CloudflareAIClient, message: dict) -> None:
+    chat = message.get("chat", {})
+    chat_id = chat.get("id")
+    user_id = message.get("from", {}).get("id")
+    text = message.get("text")
+    document = message.get("document")
+    photo = message.get("photo")
+
+    if chat.get("type") != "private":
+        return
+    if not (text or document or photo):
+        return
+
+    if Config.ALLOWED_USER_IDS and user_id not in Config.ALLOWED_USER_IDS:
+        tg.send_message(chat_id, "⛔ متاسفانه اجازه استفاده از این ربات رو نداری.")
+        return
+
+    # هر کاربر فقط یه پیام رو در آنِ واحد پردازش می‌کنه
+    with _get_user_lock(user_id):
+        # اول تاپیک‌ها رو بساز (اگه ساخته نشده باشن)
+        thoughts_topic_id, answer_topic_id, stats_topic_id = ensure_topics(tg, db, chat_id, user_id)
+
+        # اگه پیام یه دستوره (با / شروع می‌شه)، ربات مستقیم جواب می‌ده
+        # و ایجنت صدا زده نمی‌شه. این شامل /start هم می‌شه.
+        if text and is_command(text):
+            handle_command(
+                tg, db, token_manager, chat_id, user_id,
+                thoughts_topic_id, answer_topic_id, stats_topic_id, text
+            )
+            return
+
+        # --- تصویر ---
+        if photo:
+            largest = photo[-1]
+            try:
+                content_bytes, _ = tg.get_file_bytes(largest["file_id"])
+            except Exception as e:
+                tg.send_message(chat_id, f"⚠️ دانلود تصویر ناموفق بود: {e}", message_thread_id=answer_topic_id)
+                return
+            b64 = base64.b64encode(content_bytes).decode("ascii")
+            caption = (message.get("caption") or "این عکس رو توضیح بده / تحلیل کن.").strip()
+            user_content = [
+                {"type": "text", "text": caption},
+                {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}},
+            ]
+            run_agent_and_reply(
+                tg, db, token_manager, client, chat_id, user_id, thoughts_topic_id, answer_topic_id, stats_topic_id,
+                user_content, f"[عکس ارسال شد] {caption}",
+            )
+            return
+
+        # --- فایل ---
+        if document:
+            file_name = document.get("file_name") or "file"
+            mime_type = document.get("mime_type") or mimetypes.guess_type(file_name)[0] or ""
+            file_size = document.get("file_size") or 0
+            if file_size > Config.MAX_DOWNLOAD_FILE_MB * 1024 * 1024:
+                tg.send_message(
+                    chat_id,
+                    f"⚠️ فایل خیلی بزرگه (بیشتر از {Config.MAX_DOWNLOAD_FILE_MB}MB).",
+                    message_thread_id=answer_topic_id,
+                )
+                return
+            try:
+                content_bytes, _ = tg.get_file_bytes(document["file_id"])
+            except Exception as e:
+                tg.send_message(chat_id, f"⚠️ دانلود فایل ناموفق بود: {e}", message_thread_id=answer_topic_id)
+                return
+
+            caption = (message.get("caption") or "").strip()
+            ext = "." + file_name.rsplit(".", 1)[-1].lower() if "." in file_name else ""
+
+            if mime_type.startswith("image/"):
+                b64 = base64.b64encode(content_bytes).decode("ascii")
+                text_prompt = caption or "این تصویر رو تحلیل کن."
+                user_content = [
+                    {"type": "text", "text": text_prompt},
+                    {"type": "image_url", "image_url": {"url": f"data:{mime_type};base64,{b64}"}},
+                ]
+                db_text = f"[تصویر ضمیمه: {file_name}] {text_prompt}"
+            elif ext in TEXT_FILE_EXTENSIONS or mime_type.startswith("text/"):
+                text_content = content_bytes.decode("utf-8", errors="replace")
+                attachment_block = build_file_attachment_text(file_name, text_content)
+                user_content = f"{caption}\n\n{attachment_block}" if caption else attachment_block
+                db_text = f"[فایل ضمیمه: {file_name}] {caption}"
+            else:
+                user_content = (
+                    f"{caption}\n\n[فایل ضمیمه: {file_name} ({mime_type or 'نامشخص'}, "
+                    f"{file_size} بایت) - این نوع فایل باینریه و متنش قابل نمایش مستقیم نیست. "
+                    "اگه لازمه با run_shell_command یا run_python بررسیش کن."
+                ).strip()
+                db_text = f"[فایل باینری ضمیمه: {file_name}] {caption}"
+
+            run_agent_and_reply(
+                tg, db, token_manager, client, chat_id, user_id, thoughts_topic_id, answer_topic_id, stats_topic_id,
+                user_content, db_text,
+            )
+            return
+
+        # --- متن معمولی ---
+        run_agent_and_reply(
+            tg, db, token_manager, client, chat_id, user_id, thoughts_topic_id, answer_topic_id, stats_topic_id,
+            text, text,
+        )
+
+
+class HealthHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        import os
+        from urllib.parse import urlparse
+        
+        parsed_path = urlparse(self.path)
+        path = parsed_path.path
+        
+        if path == "/health":
+            body = b'{"status":"ok"}'
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+            
+        # Serve TMA static files
+        tma_dist = os.path.join(os.path.dirname(__file__), "tma", "dist")
+        if path == "/":
+            path = "/index.html"
+            
+        file_path = os.path.join(tma_dist, path.lstrip("/"))
+        
+        # SPA routing: if file doesn't exist, serve index.html
+        if not os.path.exists(file_path) and os.path.exists(os.path.join(tma_dist, "index.html")):
+            file_path = os.path.join(tma_dist, "index.html")
+            
+        if os.path.exists(file_path) and not os.path.isdir(file_path):
+            try:
+                with open(file_path, "rb") as f:
+                    content = f.read()
+                
+                self.send_response(200)
+                
+                import mimetypes
+                ctype, _ = mimetypes.guess_type(file_path)
+                if ctype:
+                    self.send_header("Content-Type", ctype)
+                
+                self.send_header("Content-Length", str(len(content)))
+                self.end_headers()
+                self.wfile.write(content)
+                return
+            except Exception:
+                pass
+                
+        self.send_response(404)
+        self.end_headers()
+
+    def do_POST(self):
+        import json
+        from urllib.parse import urlparse
+        
+        parsed_path = urlparse(self.path)
+        path = parsed_path.path
+        
+        if path == "/api/chat":
+            content_length = int(self.headers.get('Content-Length', 0))
+            post_data = self.rfile.read(content_length)
+            
+            try:
+                data = json.loads(post_data.decode('utf-8'))
+                user_message = data.get("message", "")
+                history = data.get("history", [])
+                
+                # Format history for the agent
+                agent_history = []
+                for msg in history:
+                    if msg.get("role") in ["user", "assistant"] and msg.get("content"):
+                        agent_history.append({"role": msg["role"], "content": msg["content"]})
+                        
+                client = app_state.get('client')
+                if not client:
+                    self.send_response(500)
+                    self.end_headers()
+                    return
+                    
                 # We can't stream easily without text/event-stream, so we'll just block and return the final answer.
                 from agent import run_agent
                 import time

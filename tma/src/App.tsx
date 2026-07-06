@@ -130,7 +130,7 @@ export default function App() {
       // @ts-ignore
       const chatId = window.Telegram?.WebApp?.initDataUnsafe?.user?.id || '';
       
-      const response = await fetch('/api/chat', {
+            const response = await fetch('/api/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ 
@@ -146,25 +146,88 @@ export default function App() {
         }),
       });
 
-      if (!response.ok) throw new Error('Network response was not ok');
-      
-      const data = await response.json();
-      
-      setMessages((prev) =>
-        prev.map((msg) => (msg.id === newUserMsg.id ? { ...msg, status: 'sent' } : msg))
-      );
+      if (!response.ok || !response.body) throw new Error('Network response was not ok');
 
-      const newAiMsg: Message = {
-        id: (Date.now() + 1).toString(),
-        role: 'assistant',
-        content: data.reply || 'پاسخی دریافت نشد.',
-        thoughts: data.thoughts,
-        duration: data.duration,
-        timestamp: new Date().toISOString(),
-        status: 'sent',
-      };
-      
-      setMessages((prev) => [...prev, newAiMsg]);
+      const aiMsgId = (Date.now() + 1).toString();
+      setMessages((prev) => [
+        ...prev.map((msg) => (msg.id === newUserMsg.id ? { ...msg, status: 'sent' } : msg)),
+        {
+          id: aiMsgId,
+          role: 'assistant',
+          content: '',
+          thoughts: [],
+          status: 'sending',
+          timestamp: new Date().toISOString()
+        }
+      ]);
+
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder('utf-8');
+      let buffer = '';
+
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        
+        const lines = buffer.split('\n');
+        buffer = lines.pop() || '';
+        
+        let currentEvent = '';
+        
+        for (const line of lines) {
+          if (line.startsWith('event: ')) {
+            currentEvent = line.slice(7).trim();
+          } else if (line.startsWith('data: ')) {
+            const dataStr = line.slice(6);
+            if (!dataStr) continue;
+            try {
+              const data = JSON.parse(dataStr);
+              if (currentEvent === 'step') {
+                 setMessages(prev => prev.map(m => {
+                  if (m.id === aiMsgId) {
+                    const thoughts = [...(m.thoughts || [])];
+                    thoughts.push('');
+                    return { ...m, thoughts };
+                  }
+                  return m;
+                }));
+              } else if (currentEvent === 'reasoning') {
+                setMessages(prev => prev.map(m => {
+                  if (m.id === aiMsgId) {
+                    const thoughts = [...(m.thoughts || [])];
+                    if (thoughts.length === 0) thoughts.push('');
+                    thoughts[thoughts.length - 1] += data.chunk;
+                    return { ...m, thoughts };
+                  }
+                  return m;
+                }));
+              } else if (currentEvent === 'content') {
+                setMessages(prev => prev.map(m => {
+                  if (m.id === aiMsgId) {
+                    return { ...m, content: m.content + data.chunk };
+                  }
+                  return m;
+                }));
+              } else if (currentEvent === 'done') {
+                setMessages(prev => prev.map(m => {
+                  if (m.id === aiMsgId) {
+                    return { 
+                      ...m, 
+                      content: data.reply, 
+                      thoughts: data.thoughts, 
+                      status: 'sent' 
+                    };
+                  }
+                  return m;
+                }));
+              }
+            } catch (e) {
+              console.error("Parse error", e);
+            }
+          }
+        }
+      }
     } catch (error) {
       console.error(error);
       setMessages((prev) =>
@@ -370,7 +433,19 @@ export default function App() {
 }
 
 function MessageBubble({ msg }: { msg: Message }) {
+  const [userToggled, setUserToggled] = useState(false);
   const [showThoughts, setShowThoughts] = useState(false);
+  
+  useEffect(() => {
+    if (!userToggled) {
+      if (msg.status === 'sending' && msg.thoughts && msg.thoughts.length > 0) {
+        setShowThoughts(true);
+      } else if (msg.status === 'sent' || msg.status === 'error') {
+        setShowThoughts(false);
+      }
+    }
+  }, [msg.status, msg.thoughts?.length, userToggled]);
+
   const date = new Date(msg.timestamp);
   
   return (
@@ -404,7 +479,10 @@ function MessageBubble({ msg }: { msg: Message }) {
           {msg.thoughts && msg.thoughts.length > 0 && (
               <div className="mb-3">
                   <button 
-                    onClick={() => setShowThoughts(!showThoughts)}
+                    onClick={() => {
+                      setUserToggled(true);
+                      setShowThoughts(!showThoughts);
+                    }}
                     className="flex items-center gap-2 text-xs font-medium text-slate-500 bg-white/60 hover:bg-white p-2 rounded-lg transition-colors border border-slate-200/50 w-full"
                   >
                     <BrainCircuit className="w-4 h-4 text-indigo-500" />
