@@ -112,7 +112,6 @@ export default function App() {
       id: Date.now().toString(),
       role: 'user',
       content: currentInput,
-      status: 'sending',
       // temporary property to display image in chat
       ...(attachment?.preview ? { attachment: attachment.preview } : {}),
       timestamp: new Date().toISOString(),
