@@ -419,9 +419,64 @@ def web_fetch(url: str, max_chars: int | None = None) -> str:
     return text
 
 
-TOOLS = [SHELL_TOOL_SCHEMA, PYTHON_TOOL_SCHEMA, SEND_FILE_TOOL_SCHEMA, WEB_SEARCH_TOOL_SCHEMA, WEB_FETCH_TOOL_SCHEMA]
+BACKGROUND_TASK_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "schedule_background_task",
+        "description": (
+            "یک اسکریپت پایتون را در پس‌زمینه (Background) بدون تایم‌اوت اجرا می‌کند. "
+            "مناسب برای کارهای زمان‌بندی شده (Cron jobs)، چک کردن سایت‌ها در حلقه‌های بی‌نهایت، "
+            "یا یادآوری‌ها (Reminders). در این اسکریپت می‌توانید از کتابخانه‌های requests و time استفاده کنید. "
+            "برای ارسال پیام به کاربر، باید از requests.post برای ارسال پیام به API تلگرام (https://api.telegram.org/bot<TOKEN>/sendMessage) استفاده کنید. "
+            "توکن ربات و chat_id کاربر را باید در اسکریپت هاردکد کنید (از context بدست آورید)."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "code": {
+                    "type": "string",
+                    "description": "کد پایتون برای اجرای پس‌زمینه.",
+                }
+            },
+            "required": ["code"],
+        },
+    },
+}
+
+TOOLS = [
+    BACKGROUND_TASK_SCHEMA,SHELL_TOOL_SCHEMA, PYTHON_TOOL_SCHEMA, SEND_FILE_TOOL_SCHEMA, WEB_SEARCH_TOOL_SCHEMA, WEB_FETCH_TOOL_SCHEMA]
+
+def schedule_background_task(code: str, context: dict) -> str:
+    import threading
+    import tempfile
+    import subprocess
+    import sys
+    
+    bot_token = Config.TELEGRAM_BOT_TOKEN
+    chat_id = context.get("chat_id", "")
+    
+    # Inject variables into code
+    injected_code = f"""import os
+os.environ['TELEGRAM_BOT_TOKEN'] = '{bot_token}'
+CHAT_ID = '{chat_id}'
+
+# Your code:
+{code}
+"""
+    
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".py", delete=False) as f:
+        f.write(injected_code)
+        path = f.name
+        
+    def run_it():
+        subprocess.run([sys.executable, path])
+        
+    t = threading.Thread(target=run_it, daemon=True)
+    t.start()
+    return "✅ تسک در پس‌زمینه با موفقیت اجرا شد. متغیرهای TELEGRAM_BOT_TOKEN (در os.environ) و CHAT_ID به صورت سراسری در دسترس کد شما هستند."
 
 TOOL_IMPLEMENTATIONS = {
+    "schedule_background_task": lambda args, context: schedule_background_task(args.get("code", ""), context),
     "run_shell_command": lambda args, context: run_shell_command(args.get("command", "")),
     "run_python": lambda args, context: run_python(args.get("code", "")),
     "send_telegram_file": lambda args, context: send_telegram_file(

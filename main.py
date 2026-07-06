@@ -697,13 +697,33 @@ class HealthHandler(BaseHTTPRequestHandler):
                     
                 # We can't stream easily without text/event-stream, so we'll just block and return the final answer.
                 from agent import run_agent
+                import time
+                
+                start_time = time.time()
+                
+                req_model = data.get("model", "glm-5.2")
+                chat_id = data.get("chat_id", "")
+                
+                tool_context = {
+                    "tg": app_state.get('tg'),
+                    "chat_id": chat_id,
+                }
+                
                 result = run_agent(
                     client=client,
                     history=agent_history,
                     user_content=user_message,
+                    model=req_model,
+                    tool_context=tool_context
                 )
                 
-                response_data = {"reply": result.final_answer}
+                duration = round(time.time() - start_time, 2)
+                
+                response_data = {
+                    "reply": result.final_answer,
+                    "thoughts": result.thoughts,
+                    "duration": duration
+                }
                 
                 body = json.dumps(response_data).encode("utf-8")
                 self.send_response(200)
