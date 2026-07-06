@@ -187,8 +187,7 @@ class StreamEditor:
         parse_mode = "Markdown" if force else None
         
         for chunk in split_long_text(text):
-            display = chunk + ("
-▌" if not force else "")
+            display = chunk + ("\n▌" if not force else "")
             try:
                 if self._message_id is None:
                     result = self._tg.send_message(
