@@ -221,6 +221,10 @@ export default function App() {
                   }
                   return m;
                 }));
+                break;
+              } else if (currentEvent === 'error') {
+                setMessages(prev => prev.map(m => m.id === aiMsgId ? { ...m, status: 'error', content: m.content + '\n[خطا: ' + data.message + ']' } : m));
+                break;
               }
             } catch (e) {
               console.error("Parse error", e);
