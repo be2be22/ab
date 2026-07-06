@@ -702,6 +702,7 @@ class HealthHandler(BaseHTTPRequestHandler):
                 start_time = time.time()
                 
                 req_model = data.get("model", "glm-5.2")
+                req_model = Config.MODELS.get(req_model, req_model)
                 chat_id = data.get("chat_id", "")
                 
                 tool_context = {
