@@ -174,6 +174,7 @@ export default function App() {
         buffer = lines.pop() || '';
         
         let currentEvent = '';
+        let shouldBreak = false;
         
         for (const line of lines) {
           if (line.startsWith('event: ')) {
@@ -221,16 +222,17 @@ export default function App() {
                   }
                   return m;
                 }));
-                break;
+                shouldBreak = true; break;
               } else if (currentEvent === 'error') {
                 setMessages(prev => prev.map(m => m.id === aiMsgId ? { ...m, status: 'error', content: m.content + '\n[خطا: ' + data.message + ']' } : m));
-                break;
+                shouldBreak = true; break;
               }
             } catch (e) {
               console.error("Parse error", e);
             }
           }
         }
+        if (shouldBreak) break;
       }
     } catch (error) {
       console.error(error);
