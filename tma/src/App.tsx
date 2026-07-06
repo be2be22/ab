@@ -18,6 +18,7 @@ type Message = {
   duration?: number;
   timestamp: string;
   status?: 'sending' | 'sent' | 'error';
+  attachment?: string;
 };
 
 const MODELS = [
@@ -29,6 +30,8 @@ const MODELS = [
 export default function App() {
   const [messages, setMessages] = useState<Message[]>([]);
   const [inputValue, setInputValue] = useState('');
+  const [attachment, setAttachment] = useState<{file: File, base64: string, preview?: string} | null>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
   const [isTyping, setIsTyping] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const [selectedModel, setSelectedModel] = useState('glm-5.2');
@@ -78,21 +81,47 @@ export default function App() {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages, isTyping]);
 
+    const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    
+    // Max 10MB
+    if (file.size > 10 * 1024 * 1024) {
+        alert('حجم فایل نباید بیشتر از 10 مگابایت باشد.');
+        return;
+    }
+
+    const reader = new FileReader();
+    reader.onload = (event) => {
+      const base64String = (event.target?.result as string).split(',')[1];
+      setAttachment({
+        file,
+        base64: base64String,
+        preview: file.type.startsWith('image/') ? (event.target?.result as string) : undefined
+      });
+    };
+    reader.readAsDataURL(file);
+  };
+
   const handleSend = async (e?: React.FormEvent) => {
     e?.preventDefault();
-    if (!inputValue.trim() || isTyping) return;
+    if ((!inputValue.trim() && !attachment) || isTyping) return;
 
     const currentInput = inputValue.trim();
     const newUserMsg: Message = {
       id: Date.now().toString(),
       role: 'user',
       content: currentInput,
+      status: 'sending',
+      // temporary property to display image in chat
+      ...(attachment?.preview ? { attachment: attachment.preview } : {}),
       timestamp: new Date().toISOString(),
       status: 'sending',
     };
 
     setMessages((prev) => [...prev, newUserMsg]);
     setInputValue('');
+    setAttachment(null);
     setIsTyping(true);
 
     try {
@@ -109,7 +138,12 @@ export default function App() {
             message: currentInput, 
             history,
             model: selectedModel,
-            chat_id: chatId
+            chat_id: chatId,
+            attachment: attachment ? {
+                base64: attachment.base64,
+                mime_type: attachment.file.type,
+                filename: attachment.file.name
+            } : undefined
         }),
       });
 
@@ -270,13 +304,37 @@ export default function App() {
 
       {/* Input Area */}
       <footer className="p-4 sm:p-8 bg-gradient-to-t from-slate-50 via-slate-50 to-transparent">
+                {attachment && (
+            <div className="max-w-4xl mx-auto mb-2 bg-indigo-50 border border-indigo-100 rounded-xl p-3 flex items-center justify-between">
+                <div className="flex items-center gap-3 overflow-hidden">
+                    {attachment.preview ? (
+                        <img src={attachment.preview} alt="preview" className="w-10 h-10 object-cover rounded-lg" />
+                    ) : (
+                        <div className="w-10 h-10 bg-indigo-100 text-indigo-500 rounded-lg flex items-center justify-center">
+                            <Paperclip className="w-5 h-5" />
+                        </div>
+                    )}
+                    <span className="text-sm font-medium text-slate-700 truncate">{attachment.file.name}</span>
+                </div>
+                <button type="button" onClick={() => setAttachment(null)} className="p-1.5 text-slate-400 hover:bg-slate-200 hover:text-slate-700 rounded-lg">
+                    <X className="w-4 h-4" />
+                </button>
+            </div>
+        )}
         <form 
           onSubmit={handleSend}
           className="max-w-4xl mx-auto bg-white border border-slate-200 rounded-2xl shadow-xl p-2 flex items-end gap-2 focus-within:ring-2 focus-within:ring-indigo-500/20 transition-all"
         >
+          <input 
+            type="file" 
+            ref={fileInputRef} 
+            className="hidden" 
+            onChange={handleFileChange}
+          />
           <button 
             type="button"
-            className="p-3 text-slate-400 hover:text-indigo-600 transition-colors flex-shrink-0"
+            onClick={() => fileInputRef.current?.click()}
+            className={cn("p-3 transition-colors flex-shrink-0", attachment ? "text-indigo-600" : "text-slate-400 hover:text-indigo-600")}
           >
             <Paperclip className="w-5 h-5 sm:w-6 sm:h-6" />
           </button>
@@ -376,6 +434,11 @@ function MessageBubble({ msg }: { msg: Message }) {
               </div>
           )}
           
+                    {msg.attachment && (
+            <div className="mb-3 rounded-lg overflow-hidden border border-slate-200/50">
+              <img src={msg.attachment} alt="attachment" className="w-full h-auto max-h-64 object-cover" />
+            </div>
+          )}
           <div dir="auto">{msg.content}</div>
         </div>
         <div 

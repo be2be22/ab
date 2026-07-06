@@ -710,10 +710,32 @@ class HealthHandler(BaseHTTPRequestHandler):
                     "chat_id": chat_id,
                 }
                 
+                # Check for attachment
+                attachment = data.get("attachment")
+                user_content_to_agent = user_message
+                
+                if attachment and attachment.get("base64"):
+                    b64 = attachment["base64"]
+                    mime = attachment.get("mime_type", "application/octet-stream")
+                    fname = attachment.get("filename", "file")
+                    
+                    if mime.startswith("image/"):
+                        user_content_to_agent = [
+                            {"type": "text", "text": user_message or "این عکس رو تحلیل کن."},
+                            {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64}"}}
+                        ]
+                    else:
+                        try:
+                            import base64
+                            decoded = base64.b64decode(b64).decode("utf-8")
+                            user_content_to_agent = f"{user_message}\n\n[محتوای فایل {fname}]:\n{decoded}"
+                        except Exception:
+                            user_content_to_agent = f"{user_message}\n\n[فایل باینری ضمیمه شد: {fname}]"
+
                 result = run_agent(
                     client=client,
                     history=agent_history,
-                    user_content=user_message,
+                    user_content=user_content_to_agent,
                     model=req_model,
                     tool_context=tool_context
                 )
