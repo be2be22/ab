@@ -9,8 +9,8 @@ from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from config import Config
-from cf_client import CloudflareAIClient
-from cf_key_manager import CloudflareTokenManager
+from ai_client import AIClient
+from key_manager import AITokenManager
 from telegram_api import TelegramAPI, split_long_text
 from storage import Storage
 from agent import run_agent
@@ -58,7 +58,7 @@ def ensure_topics(tg: TelegramAPI, db: Storage, chat_id: int, user_id: int) -> t
         db.set_stats_topic(user_id, stats_id)
         tg.send_message(
             chat_id,
-            "این تاپیک وضعیت توکن‌های Cloudflare و مصرف‌شون رو نشون می‌ده 🔑\n"
+            "این تاپیک وضعیت API Key های 9Router و مصرف‌شون رو نشون می‌ده 🔑\n"
             "برای دیدن آمار کامل، /stats رو بفرست.",
             message_thread_id=stats_id,
         )
@@ -79,14 +79,14 @@ def ensure_topics(tg: TelegramAPI, db: Storage, chat_id: int, user_id: int) -> t
     tg.send_message(chat_id, "پاسخ‌های نهایی من اینجا میاد 💬", message_thread_id=answer_id)
     tg.send_message(
         chat_id,
-        "این تاپیک وضعیت توکن‌های Cloudflare و مصرف‌شون رو نشون می‌ده 🔑\n"
+        "این تاپیک وضعیت API Key های 9Router و مصرف‌شون رو نشون می‌ده 🔑\n"
         "برای دیدن آمار کامل، /stats رو بفرست.",
         message_thread_id=stats_id,
     )
     return thoughts_id, answer_id, stats_id
 
 
-def format_tokens_stats_text(token_manager: CloudflareTokenManager, header: str = "🔑 *وضعیت توکن‌های Cloudflare*") -> str:
+def format_tokens_stats_text(token_manager: AITokenManager, header: str = "🔑 *وضعیت API Key های 9Router*") -> str:
     lines = [header]
     active_masked = token_manager.active_token_masked()
     lines.append(f"توکنِ در حالِ استفاده الان: `{active_masked or 'هنوز درخواستی زده نشده'}`")
@@ -236,7 +236,7 @@ def is_command(text: str | None) -> bool:
 def handle_command(
     tg: TelegramAPI,
     db: Storage,
-    token_manager: CloudflareTokenManager,
+    token_manager: AITokenManager,
     chat_id: int,
     user_id: int,
     thoughts_topic_id: int,
@@ -273,7 +273,7 @@ def handle_command(
             f"- کل پیام‌های ثبت‌شده: {db.count_messages()}\n"
             f"- تعداد کاربران فعال: {db.count_users()}\n"
             f"- مدل فعلی شما: `{model_key}` → `{model_id}`\n"
-            f"- توکن‌های Cloudflare فعال: {token_manager.available_tokens_count()}/{token_manager.total_tokens_count()}\n"
+            f"- API Key های 9Router فعال: {token_manager.available_tokens_count()}/{token_manager.total_tokens_count()}\n"
             f"- کل درخواست‌ها: {token_manager.total_requests()}\n"
             f"- کل توکن مصرفی: {token_manager.total_tokens_used():,}\n"
             f"- زمان روشن بودن: {int((time.time() - START_TIME) // 60)} دقیقه\n\n"
@@ -288,8 +288,8 @@ def handle_command(
         for key, model_id in Config.MODELS.items():
             marker = "✅" if key == model_key else "▫️"
             lines.append(f"{marker} `{key}` → {model_id}")
-        lines.append("\n*پیش‌فرض:* `glm-5.2` (reasoning، دقیق‌تر) — برای پاسخ سریع‌تر: `llama-3.3-70b`")
-        lines.append("\nبرای تعویض: `/model <نام>` مثلا `/model glm-5.2`")
+        lines.append(f"\n*پیش‌فرض:* `{Config.DEFAULT_MODEL_KEY}`")
+        lines.append("\nبرای تعویض: `/model <نام>` مثلا `/model deepseek-v4-flash`")
         tg.send_message(chat_id, "\n".join(lines), message_thread_id=answer_topic_id)
         return True
 
@@ -298,7 +298,7 @@ def handle_command(
         if len(parts) < 2 or not parts[1].strip():
             tg.send_message(
                 chat_id,
-                "برای دیدن لیست مدل‌ها از /models استفاده کن. مثال تعویض: `/model glm-5.2`",
+                "برای دیدن لیست مدل‌ها از /models استفاده کن. مثال تعویض: `/model deepseek-v4-flash`",
                 message_thread_id=answer_topic_id,
             )
             return True
@@ -372,10 +372,10 @@ def handle_command(
             "*تاپیک‌ها:*\n"
             "• 🧠 فکرها - مراحل فکر ایجنت\n"
             "• 💬 پاسخ نهایی - جواب نهایی\n"
-            "• 🔑 آمار و توکن‌ها - وضعیت توکن‌های Cloudflare\n\n"
+            "• 🔑 آمار و توکن‌ها - وضعیت API Key های 9Router\n\n"
             "*مدل‌های پیشنهادی:*\n"
-            "• `glm-5.2` - reasoning، دقیق‌تر (پیش‌فرض)\n"
-            "• `llama-3.3-70b` - سریع‌تر، برای پاسخ فوری\n\n"
+            "• `mimo-v2.5` - سریع و باکیفیت (پیش‌فرض)\n"
+            "• `deepseek-v4-flash` - سریع‌تر، برای پاسخ فوری\n\n"
             "برای سوال زمان‌مندی (قیمت، اخبار، آب‌وهوا) فقط بپرس، خودم جستجو می‌کنم!"
         )
         tg.send_message(chat_id, help_text, message_thread_id=answer_topic_id)
@@ -425,8 +425,8 @@ def _maybe_send_images_from_reply(tg: TelegramAPI, chat_id: int, message_thread_
 def run_agent_and_reply(
     tg: TelegramAPI,
     db: Storage,
-    token_manager: CloudflareTokenManager,
-    client: CloudflareAIClient,
+    token_manager: AITokenManager,
+    client: AIClient,
     chat_id: int,
     user_id: int,
     thoughts_topic_id: int,
@@ -511,7 +511,7 @@ def run_agent_and_reply(
     db.trim_history(user_id, Config.MAX_HISTORY_MESSAGES)
 
 
-def handle_message(tg: TelegramAPI, db: Storage, token_manager: CloudflareTokenManager, client: CloudflareAIClient, message: dict) -> None:
+def handle_message(tg: TelegramAPI, db: Storage, token_manager: AITokenManager, client: AIClient, message: dict) -> None:
     chat = message.get("chat", {})
     chat_id = chat.get("id")
     user_id = message.get("from", {}).get("id")
@@ -700,7 +700,7 @@ class HealthHandler(BaseHTTPRequestHandler):
                 
                 start_time = time.time()
                 
-                req_model = data.get("model", "glm-5.2")
+                req_model = data.get("model", Config.DEFAULT_MODEL_KEY)
                 req_model = Config.MODELS.get(req_model, req_model)
                 chat_id = data.get("chat_id", "")
                 
@@ -809,14 +809,14 @@ def main() -> None:
     tg = TelegramAPI(Config.TELEGRAM_BOT_TOKEN)
     db = Storage(Config.DB_PATH)
 
-    # مدیریت توکن‌های Cloudflare (پشتیبانی از چند توکن)
-    token_manager = CloudflareTokenManager(
-        Config.CF_AI_TOKENS, Config.CF_KEY_COOLDOWN_SECONDS
+    # مدیریت API Key های 9Router (پشتیبانی از چند کلید)
+    token_manager = AITokenManager(
+        Config.AI_API_KEYS, Config.AI_KEY_COOLDOWN_SECONDS
     )
-    client = CloudflareAIClient(
+    client = AIClient(
         token_manager=token_manager,
-        base_url=Config.CF_AI_BASE_URL,
-        model=Config.MODELS.get(Config.DEFAULT_MODEL_KEY, "@cf/meta/llama-3.3-70b-instruct-fp8-fast"),
+        base_url=Config.AI_BASE_URL,
+        model=Config.MODELS.get(Config.DEFAULT_MODEL_KEY, "oc/mimo-v2.5-free"),
     )
 
     app_state['db'] = db
@@ -826,7 +826,7 @@ def main() -> None:
 
     print(
         f"✅ ربات روشن شد. مدل پیش‌فرض: {Config.DEFAULT_MODEL_KEY} | "
-        f"تعداد توکن Cloudflare: {token_manager.total_tokens_count()} | "
+        f"تعداد API Key 9Router: {token_manager.total_tokens_count()} | "
         f"Concurrency: {Config.MAX_CONCURRENT_UPDATES}"
     )
 

@@ -1,11 +1,10 @@
 """
-مدیریت توکن‌های Cloudflare Workers AI.
+مدیریت API Key های 9Router (پروایدر OpenCode Free و بقیه‌ی مدل‌ها).
 
-اگه چندتا اکانت Cloudflare داری، می‌تونی چند توکن با کاما توی CF_AI_TOKENS بذاری.
-ربات به‌صورت sticky بینشون می‌چرخه — یعنی همون توکنی که کار می‌کنه رو نگه می‌داره
-تا وقتی که rate-limit بخوره. اگه یکی rate-limit خورد، میره سراغ بعدی.
-
-این ماژول سبک‌تر از key_manager قبلی (NVIDIA) هست و فقط چیزی که لازمه رو داره.
+اگه چندتا API Key از داشبورد 9Router داری، می‌تونی چند تا رو با کاما توی
+AI_API_KEYS بذاری. ربات به‌صورت sticky بینشون می‌چرخه — یعنی همون کلیدی که
+کار می‌کنه رو نگه می‌داره تا وقتی که rate-limit بخوره. اگه یکی rate-limit
+خورد، میره سراغ بعدی.
 """
 import time
 import threading
@@ -36,9 +35,9 @@ class TokenState:
         return self.prompt_tokens + self.completion_tokens
 
 
-class CloudflareTokenManager:
+class AITokenManager:
     """
-    یه استخر (pool) از چند توکن Cloudflare نگه می‌داره.
+    یه استخر (pool) از چند API Key نگه می‌داره.
 
     استراتژی sticky: همون توکنی که داره کار می‌کنه رو نگه می‌داره تا وقتی که
     rate-limit بخوره؛ فقط اون وقت میره سراغ توکن بعدی. این یعنی:
@@ -48,7 +47,7 @@ class CloudflareTokenManager:
 
     def __init__(self, tokens: list[str], default_cooldown_seconds: int = 30):
         if not tokens:
-            raise ValueError("حداقل یک توکن Cloudflare لازمه")
+            raise ValueError("حداقل یک API Key از 9Router لازمه")
         self._states = [TokenState(token=t) for t in tokens]
         self._default_cooldown = default_cooldown_seconds
         self._lock = threading.Lock()

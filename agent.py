@@ -1,7 +1,7 @@
 import json
 
 from config import Config
-from cf_client import CloudflareAIClient, CloudflareError
+from ai_client import AIClient, AIError
 from tools import TOOLS, TOOL_IMPLEMENTATIONS
 
 SYSTEM_PROMPT = (
@@ -46,7 +46,7 @@ class AgentResult:
 
 # مدل‌هایی که reasoning_effort روشون معنا داره (بقیه‌ی مدل‌ها این پارامتر رو نمی‌شناسن
 # و ممکنه با فرستادنش خطا بدن، پس فقط برای این مدل‌ها می‌فرستیمش).
-_REASONING_MODEL_MARKERS = ("glm-5", "deepseek-r1", "qwq", "gpt-oss")
+_REASONING_MODEL_MARKERS = ("glm-5", "deepseek-r1", "qwq", "gpt-oss", "mimo")
 
 
 def _is_reasoning_model(model_id: str | None) -> bool:
@@ -113,7 +113,7 @@ def _needs_tools(user_content) -> bool:
 
 
 def run_agent(
-    client: CloudflareAIClient,
+    client: AIClient,
     history: list[dict],
     user_content,
     model: str | None = None,
@@ -165,14 +165,14 @@ def run_agent(
             else:
                 max_tok = 1500  # حالت وسط
 
-            # ⚡ کنترل عمق فکر کردن مدل‌های reasoning (glm-5.2, deepseek-r1) با
+            # ⚡ کنترل عمق فکر کردن مدل‌های reasoning (مثل mimo-v2.5) با
             # reasoning_effort. برای پیام‌های ساده effort کم می‌ذاریم تا مدل خیلی سریع‌تر
             # جواب بده؛ وقتی ابزار لازمه، effort متوسط می‌ذاریم تا انتخاب ابزار درست بمونه.
-            # روی مدل‌های non-reasoning (llama, qwen coder) این پارامتر اصلاً فرستاده نمی‌شه.
+            # روی مدل‌های non-reasoning این پارامتر اصلاً فرستاده نمی‌شه.
             reasoning_effort = None
             if _is_reasoning_model(model):
                 reasoning_effort = (
-                    Config.CF_REASONING_EFFORT_WITH_TOOLS if tools else Config.CF_REASONING_EFFORT
+                    Config.AI_REASONING_EFFORT_WITH_TOOLS if tools else Config.AI_REASONING_EFFORT
                 )
 
             if on_content_delta or on_reasoning_delta:
@@ -195,9 +195,9 @@ def run_agent(
                     max_tokens=max_tok,
                     reasoning_effort=reasoning_effort,
                 )
-        except CloudflareError as e:
-            err_msg = f"⚠️ خطای Cloudflare: {e}"
-            print(f"⚠️ Agent CloudflareError at step {step}: {e}")
+        except AIError as e:
+            err_msg = f"⚠️ خطای 9Router: {e}"
+            print(f"⚠️ Agent AIError at step {step}: {e}")
             return AgentResult(thoughts=thoughts, final_answer=err_msg)
         except Exception as e:
             err_msg = f"⚠️ خطا در ارتباط با مدل: {e}"

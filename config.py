@@ -15,50 +15,39 @@ class Config:
         int(x) for x in _split_csv(os.environ.get("ALLOWED_USER_IDS", "")) if x.isdigit()
     ]
 
-    # --- Cloudflare Workers AI ---
-    # اطلاعات اکانت و توکن‌ها رو از پنل Cloudflare بگیر:
-    # https://dash.cloudflare.com → My Profile → API Tokens → Create Token
-    #   Permissions: Account → Workers AI → Edit
+    # --- 9Router (پروایدر OpenCode Free و بقیه‌ی پروایدرهای متصل) ---
+    # 9Router رو خودت روی Railway (یا هر جای دیگه) دیپلوی می‌کنی و یه اندپوینت
+    # سازگار با OpenAI بهت می‌ده. این آدرس باید با /v1 تموم بشه، مثلا:
+    # AI_BASE_URL=https://my-9router.up.railway.app/v1
     #
-    # چند توکن: اگه چندتا اکانت Cloudflare داری، می‌تونی چند توکن با کاما بذاری.
-    # ربات به‌صورت round-robin بینشون می‌چرخه و اگه یکی rate-limit بخوره، میره سراغ بعدی.
-    # مثال: CF_AI_TOKENS=cfut_xxx,cfut_yyy,cfut_zzz
-    CF_ACCOUNT_ID: str = os.environ.get("CF_ACCOUNT_ID", "")
-    # برای backward compat: اگه CF_AI_TOKEN تنظیم شده باشه، از اون استفاده می‌کنه
-    CF_AI_TOKENS: list[str] = _split_csv(
-        os.environ.get("CF_AI_TOKENS", "") or os.environ.get("CF_AI_TOKEN", "")
-    )
-    CF_AI_BASE_URL: str = os.environ.get(
-        "CF_AI_BASE_URL",
-        f"https://api.cloudflare.com/client/v4/accounts/{CF_ACCOUNT_ID}/ai/v1",
+    # چند API Key: اگه چند کلید از داشبورد 9Router داری، می‌تونی با کاما بذاری.
+    # ربات به‌صورت sticky بینشون می‌چرخه و اگه یکی rate-limit بخوره، میره سراغ بعدی.
+    # مثال: AI_API_KEYS=key_xxx,key_yyy
+    AI_BASE_URL: str = os.environ.get("AI_BASE_URL", "")
+    AI_API_KEYS: list[str] = _split_csv(
+        os.environ.get("AI_API_KEYS", "") or os.environ.get("AI_API_KEY", "")
     )
 
     # --- مدل‌های قابل انتخاب با /model و /models ---
-    # این لیست فقط مدل‌هایی هستن که واقعاً روی Cloudflare کار می‌کنن (تست‌شده).
-    # کلید کوتاه -> شناسه واقعی مدل
+    # این‌ها مدل‌های رایگان پروایدر OpenCode Free هستن که از طریق 9Router در دسترسن.
+    # هر مدل رایگان جدیدی که OpenCode منتشر کنه، کافیه اینجا با یه کلید کوتاه اضافه بشه.
+    # کلید کوتاه -> شناسه‌ی واقعی مدل (همونی که تو داشبورد 9Router می‌بینی)
     MODELS: dict[str, str] = {
-        # سریع و قدرتمند (پیشنهادی — هم سریعه هم باکیفیت)
-        "llama-3.3-70b": "@cf/meta/llama-3.3-70b-instruct-fp8-fast",
-        # خیلی سریع و سبک
-        "llama-3.2-3b": "@cf/meta/llama-3.2-3b-instruct",
-        # reasoning (اول فکر می‌کنه بعد جواب می‌ده — کندتر ولی دقیق‌تر)
-        "glm-5.2": "@cf/zai-org/glm-5.2",
-        "deepseek-r1": "@cf/deepseek-ai/deepseek-r1-distill-qwen-32b",
-        # تخصصی کدنویسی
-        "qwen2.5-coder": "@cf/qwen/qwen2.5-coder-32b-instruct",
+        "mimo-v2.5": "oc/mimo-v2.5-free",
+        "deepseek-v4-flash": "oc/deepseek-v4-flash-free",
     }
-    # مدل پیش‌فرض: glm-5.2 (reasoning — دقیق‌تر و باکیفیت‌تر از مدل‌های non-reasoning)
-    DEFAULT_MODEL_KEY: str = os.environ.get("DEFAULT_MODEL_KEY", "glm-5.2")
+    # مدل پیش‌فرض
+    DEFAULT_MODEL_KEY: str = os.environ.get("DEFAULT_MODEL_KEY", "mimo-v2.5")
 
-    # --- Reasoning effort (فقط برای مدل‌های reasoning مثل glm-5.2 معنا داره) ---
+    # --- Reasoning effort (فقط برای مدل‌های reasoning معنا داره) ---
     # هرچی effort کمتر باشه، مدل کمتر "فکر" می‌کنه قبل از جواب دادن => سریع‌تر جواب می‌ده،
     # ولی برای مسائل خیلی پیچیده ممکنه دقتش کمی کمتر بشه.
-    # مقادیر مجاز (طبق مستندات Cloudflare/OpenAI-style): "low" | "medium" | "high"
-    # پیش‌فرض روی "low" گذاشته شده تا حتی با glm-5.2، جواب‌ها سریع بیان (حتی برای «سلام»).
-    CF_REASONING_EFFORT: str = os.environ.get("CF_REASONING_EFFORT", "low")
+    # مقادیر مجاز (سبک OpenAI-style): "low" | "medium" | "high"
+    # پیش‌فرض روی "low" گذاشته شده تا حتی با مدل‌های reasoning، جواب‌ها سریع بیان.
+    AI_REASONING_EFFORT: str = os.environ.get("AI_REASONING_EFFORT", "low")
     # اگه پیام کاربر به ابزار نیاز داشته باشه (تحلیل، کد، تحقیق)، effort بالاتری استفاده
     # می‌شه چون انتخاب درست ابزار و برنامه‌ریزی چندمرحله‌ای به فکر بیشتری نیاز داره.
-    CF_REASONING_EFFORT_WITH_TOOLS: str = os.environ.get("CF_REASONING_EFFORT_WITH_TOOLS", "medium")
+    AI_REASONING_EFFORT_WITH_TOOLS: str = os.environ.get("AI_REASONING_EFFORT_WITH_TOOLS", "medium")
 
     # --- Agent / Shell ---
     SHELL_ENABLED: bool = os.environ.get("SHELL_ENABLED", "true").lower() == "true"
@@ -94,24 +83,24 @@ class Config:
     # --- ارسال خودکار عکس‌های داخل پاسخ مدل ---
     AUTO_SEND_IMAGES_IN_REPLY: bool = os.environ.get("AUTO_SEND_IMAGES_IN_REPLY", "true").lower() == "true"
 
-    # --- تلاش مجدد برای Cloudflare ---
-    # Cloudflare گاهی "Capacity temporarily exceeded" می‌ده. این تعداد تلاش مجدده.
-    CF_MAX_RETRIES: int = int(os.environ.get("CF_MAX_RETRIES", "3"))
-    CF_RETRY_DELAY: float = float(os.environ.get("CF_RETRY_DELAY", "1.0"))
+    # --- تلاش مجدد برای 9Router ---
+    # گاهی پروایدر رایگان "Capacity temporarily exceeded" یا 429 می‌ده. این تعداد تلاش مجدده.
+    AI_MAX_RETRIES: int = int(os.environ.get("AI_MAX_RETRIES", "3"))
+    AI_RETRY_DELAY: float = float(os.environ.get("AI_RETRY_DELAY", "1.0"))
 
-    # --- مدیریت توکن‌های Cloudflare ---
-    # وقتی یه توکن rate-limit بخوره، چند ثانیه کنار گذاشته می‌شه
-    CF_KEY_COOLDOWN_SECONDS: int = int(os.environ.get("CF_KEY_COOLDOWN_SECONDS", "30"))
+    # --- مدیریت API Key های 9Router ---
+    # وقتی یه کلید rate-limit بخوره، چند ثانیه کنار گذاشته می‌شه
+    AI_KEY_COOLDOWN_SECONDS: int = int(os.environ.get("AI_KEY_COOLDOWN_SECONDS", "30"))
 
     @classmethod
     def validate(cls) -> None:
         missing = []
         if not cls.TELEGRAM_BOT_TOKEN:
             missing.append("TELEGRAM_BOT_TOKEN")
-        if not cls.CF_ACCOUNT_ID:
-            missing.append("CF_ACCOUNT_ID")
-        if not cls.CF_AI_TOKENS:
-            missing.append("CF_AI_TOKENS (یا CF_AI_TOKEN)")
+        if not cls.AI_BASE_URL:
+            missing.append("AI_BASE_URL (آدرس /v1 نمونه‌ی 9Router خودت روی Railway)")
+        if not cls.AI_API_KEYS:
+            missing.append("AI_API_KEYS (یا AI_API_KEY — کلید ساخته‌شده تو داشبورد 9Router)")
         if missing:
             raise RuntimeError(f"متغیرهای محیطی الزامی تنظیم نشدن: {', '.join(missing)}")
         if not cls.ALLOWED_USER_IDS:
