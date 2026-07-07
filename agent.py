@@ -155,7 +155,7 @@ def run_agent(
         if on_step_start:
             on_step_start()
         try:
-            # ⚡ بهینه‌سازی سرعت برای مدل‌های reasoning (مثل GLM-5.2):
+            # ⚡ بهینه‌سازی سرعت برای مدل‌های reasoning (مثل mimo-v2.5):
             # اگه سوال ساده‌ست (به tool نیاز نداره)، max_tokens رو کم می‌کنیم تا
             # reasoning سریع‌تر تموم بشه.
             if not tools and step == 0 and not _needs_tools(user_content):

@@ -22,9 +22,8 @@ type Message = {
 };
 
 const MODELS = [
-  { id: 'glm-5.2', name: 'هوشمند - GLM 5.2 (فکر کردن)' },
-  { id: 'llama-3.3-70b', name: 'سریع - Llama 3.3 70B' },
-  { id: 'deepseek-r1', name: 'عمیق - DeepSeek R1' },
+  { id: 'mimo-v2.5', name: 'هوشمند - MiMo v2.5 (فکر کردن)' },
+  { id: 'deepseek-v4-flash', name: 'سریع - DeepSeek V4 Flash' },
 ];
 
 export default function App() {
@@ -34,7 +33,7 @@ export default function App() {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [isTyping, setIsTyping] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
-  const [selectedModel, setSelectedModel] = useState('glm-5.2');
+  const [selectedModel, setSelectedModel] = useState('mimo-v2.5');
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   // Initialize
